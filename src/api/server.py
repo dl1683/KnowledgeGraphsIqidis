@@ -777,6 +777,256 @@ def api_batch_merge():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Timeline ====================
+
+def _parse_date(date_str: str) -> Optional[str]:
+    """Try to parse a date string into ISO format for sorting."""
+    import re
+    from datetime import datetime
+
+    if not date_str:
+        return None
+
+    # Common date patterns
+    patterns = [
+        (r'(\d{4})-(\d{1,2})-(\d{1,2})', '%Y-%m-%d'),
+        (r'(\d{1,2})/(\d{1,2})/(\d{4})', '%m/%d/%Y'),
+        (r'(\d{1,2})/(\d{1,2})/(\d{2})', '%m/%d/%y'),
+        (r'(\w+)\s+(\d{1,2}),?\s+(\d{4})', '%B %d %Y'),
+        (r'(\d{1,2})\s+(\w+)\s+(\d{4})', '%d %B %Y'),
+    ]
+
+    # Try direct parsing
+    for regex, fmt in patterns:
+        match = re.search(regex, date_str)
+        if match:
+            try:
+                date_part = match.group(0).replace(',', '')
+                dt = datetime.strptime(date_part, fmt)
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+
+    # Look for just a year
+    year_match = re.search(r'\b(19|20)\d{2}\b', date_str)
+    if year_match:
+        return f"{year_match.group(0)}-01-01"
+
+    return None
+
+
+@api.route('/timeline')
+def api_timeline():
+    """Get timeline of dated events/entities."""
+    limit = int(request.args.get('limit', 200))
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get Date entities
+        cursor.execute('''
+            SELECT e.id, e.canonical_name, e.type, e.properties
+            FROM entities e
+            WHERE e.type = 'Date'
+            ORDER BY e.canonical_name
+        ''')
+        date_entities = [dict(row) for row in cursor.fetchall()]
+
+        # Get facts with dates (deadlines, key_terms with dates)
+        cursor.execute('''
+            SELECT e.id, e.canonical_name, e.type, e.properties
+            FROM entities e
+            WHERE e.type = 'Fact'
+            AND (
+                json_extract(e.properties, '$.fact_type') IN ('deadline', 'key_term')
+                OR e.canonical_name LIKE '%date%'
+                OR e.canonical_name LIKE '%deadline%'
+            )
+            LIMIT ?
+        ''', (limit,))
+        fact_entities = [dict(row) for row in cursor.fetchall()]
+
+        # Build timeline entries
+        timeline = []
+
+        for entity in date_entities:
+            parsed = _parse_date(entity['canonical_name'])
+            props = json.loads(entity.get('properties', '{}') or '{}')
+
+            # Get related entities
+            cursor.execute('''
+                SELECT DISTINCT e2.canonical_name, e2.type, ed.relation_type
+                FROM edges ed
+                JOIN entities e2 ON (
+                    (ed.source_entity_id = ? AND ed.target_entity_id = e2.id)
+                    OR (ed.target_entity_id = ? AND ed.source_entity_id = e2.id)
+                )
+                WHERE e2.type != 'Date'
+                LIMIT 10
+            ''', (entity['id'], entity['id']))
+            related = [{'name': r['canonical_name'], 'type': r['type'], 'relation': r['relation_type']}
+                      for r in cursor.fetchall()]
+
+            timeline.append({
+                'id': entity['id'],
+                'date_raw': entity['canonical_name'],
+                'date_parsed': parsed,
+                'type': 'date',
+                'description': entity['canonical_name'],
+                'related_entities': related,
+                'properties': props
+            })
+
+        for entity in fact_entities:
+            props = json.loads(entity.get('properties', '{}') or '{}')
+            parsed = _parse_date(props.get('due_date', '') or props.get('date', '') or entity['canonical_name'])
+
+            timeline.append({
+                'id': entity['id'],
+                'date_raw': props.get('due_date', '') or props.get('date', ''),
+                'date_parsed': parsed,
+                'type': props.get('fact_type', 'fact'),
+                'description': entity['canonical_name'][:200],
+                'related_entities': [],
+                'properties': props
+            })
+
+        # Sort by parsed date (entries without dates go at the end)
+        timeline.sort(key=lambda x: (x['date_parsed'] is None, x['date_parsed'] or ''))
+
+        return jsonify({
+            'total': len(timeline),
+            'timeline': timeline[:limit]
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== Export ====================
+
+@api.route('/export')
+def api_export():
+    """Export graph data in various formats."""
+    format_type = request.args.get('format', 'json')
+    include_facts = request.args.get('include_facts', 'true').lower() == 'true'
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get all entities
+        cursor.execute('''
+            SELECT id, canonical_name, type, properties, confidence
+            FROM entities
+            WHERE type != 'Fact' OR ?
+            ORDER BY type, canonical_name
+        ''', (include_facts,))
+        entities = [dict(row) for row in cursor.fetchall()]
+
+        # Get all edges
+        cursor.execute('''
+            SELECT e.id, e.source_entity_id, e.target_entity_id, e.relation_type, e.properties,
+                   src.canonical_name as source_name, tgt.canonical_name as target_name
+            FROM edges e
+            JOIN entities src ON e.source_entity_id = src.id
+            JOIN entities tgt ON e.target_entity_id = tgt.id
+        ''')
+        edges = [dict(row) for row in cursor.fetchall()]
+
+        if format_type == 'json':
+            # Full JSON export
+            return jsonify({
+                'matter': _matter_name,
+                'entities': entities,
+                'edges': edges,
+                'stats': {
+                    'entity_count': len(entities),
+                    'edge_count': len(edges)
+                }
+            })
+
+        elif format_type == 'csv':
+            # CSV format - entities and edges as separate files in a zip
+            import io
+            import csv
+            import zipfile
+            from flask import Response
+
+            # Create zip in memory
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                # Entities CSV
+                entities_csv = io.StringIO()
+                writer = csv.DictWriter(entities_csv, fieldnames=['id', 'canonical_name', 'type', 'properties', 'confidence'])
+                writer.writeheader()
+                writer.writerows(entities)
+                zf.writestr('entities.csv', entities_csv.getvalue())
+
+                # Edges CSV
+                edges_csv = io.StringIO()
+                writer = csv.DictWriter(edges_csv, fieldnames=['id', 'source_entity_id', 'target_entity_id', 'source_name', 'target_name', 'relation_type', 'properties'])
+                writer.writeheader()
+                writer.writerows(edges)
+                zf.writestr('edges.csv', edges_csv.getvalue())
+
+            zip_buffer.seek(0)
+            return Response(
+                zip_buffer.getvalue(),
+                mimetype='application/zip',
+                headers={'Content-Disposition': f'attachment; filename={_matter_name}_export.zip'}
+            )
+
+        elif format_type == 'graphml':
+            # GraphML format for tools like Gephi, yEd
+            from flask import Response
+
+            graphml = ['<?xml version="1.0" encoding="UTF-8"?>']
+            graphml.append('<graphml xmlns="http://graphml.graphdrawing.org/xmlns">')
+            graphml.append('  <key id="name" for="node" attr.name="name" attr.type="string"/>')
+            graphml.append('  <key id="type" for="node" attr.name="type" attr.type="string"/>')
+            graphml.append('  <key id="relation" for="edge" attr.name="relation" attr.type="string"/>')
+            graphml.append('  <graph id="G" edgedefault="directed">')
+
+            # Add nodes
+            for e in entities:
+                eid = e['id'].replace('-', '_')
+                name = e['canonical_name'].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+                graphml.append(f'    <node id="{eid}">')
+                graphml.append(f'      <data key="name">{name}</data>')
+                graphml.append(f'      <data key="type">{e["type"]}</data>')
+                graphml.append(f'    </node>')
+
+            # Add edges
+            for edge in edges:
+                src = edge['source_entity_id'].replace('-', '_')
+                tgt = edge['target_entity_id'].replace('-', '_')
+                rel = edge['relation_type']
+                graphml.append(f'    <edge source="{src}" target="{tgt}">')
+                graphml.append(f'      <data key="relation">{rel}</data>')
+                graphml.append(f'    </edge>')
+
+            graphml.append('  </graph>')
+            graphml.append('</graphml>')
+
+            return Response(
+                '\n'.join(graphml),
+                mimetype='application/xml',
+                headers={'Content-Disposition': f'attachment; filename={_matter_name}.graphml'}
+            )
+
+        else:
+            return jsonify({'error': f'Unknown format: {format_type}'}), 400
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== App Factory ====================
 
 def create_app(matter_name: str, api_key: str = GEMINI_API_KEY) -> Flask:

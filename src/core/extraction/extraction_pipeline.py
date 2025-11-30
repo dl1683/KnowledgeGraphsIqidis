@@ -138,6 +138,9 @@ class ExtractionPipeline:
         for extraction, chunk in results:
             # Add span offsets to entities
             for entity in extraction.entities:
+                # Ensure properties is a dict (LLM might return a list)
+                if not isinstance(entity.properties, dict):
+                    entity.properties = {}
                 entity.properties['chunk_start'] = chunk.start_char
                 entity.properties['chunk_end'] = chunk.end_char
 
