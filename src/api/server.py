@@ -2080,6 +2080,77 @@ def api_clusters():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Entity Disambiguation ====================
+
+@api.route('/disambiguate')
+def api_disambiguate():
+    """
+    Disambiguate an entity name to canonical entities.
+
+    Query params:
+        name: The entity name to disambiguate
+        type: Optional entity type filter
+    """
+    name = request.args.get('name', '')
+    entity_type = request.args.get('type', None)
+
+    if not name:
+        return jsonify({'error': 'Missing required parameter: name'}), 400
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        candidates = query_engine.disambiguate_entity(name, entity_type)
+
+        return jsonify({
+            'query': name,
+            'type_filter': entity_type,
+            'candidates': candidates,
+            'best_match': candidates[0] if candidates else None
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/resolve-entities', methods=['POST'])
+def api_resolve_entities():
+    """
+    Resolve multiple entity references to their canonical matches.
+
+    Request body:
+        entities: List of entity names to resolve
+    """
+    data = request.get_json()
+    if not data or 'entities' not in data:
+        return jsonify({'error': 'Missing required field: entities'}), 400
+
+    entities = data['entities']
+    if not isinstance(entities, list):
+        return jsonify({'error': 'entities must be a list'}), 400
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        resolved = query_engine.resolve_entity_references(entities)
+
+        return jsonify({
+            'resolved': resolved,
+            'success_rate': sum(1 for r in resolved if r['resolved_id']) / len(resolved) if resolved else 0
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== App Factory ====================
 
 def create_app(matter_name: str, api_key: str = GEMINI_API_KEY) -> Flask:

@@ -238,6 +238,128 @@ Output as JSON array:
 
         return NLQueryEngine._schema_cache
 
+    def disambiguate_entity(self, query_name: str, entity_type: str = None) -> List[Dict[str, Any]]:
+        """
+        Disambiguate a user-provided entity name to canonical entities.
+
+        Returns a ranked list of potential matches with confidence scores.
+        """
+        candidates = []
+        query_lower = query_name.lower().strip()
+
+        # Search for matching entities
+        matches = self.db.search_entities_by_name(query_name, limit=30)
+
+        # Filter by type if specified
+        if entity_type:
+            matches = [m for m in matches if m.type == entity_type]
+
+        for entity in matches:
+            score = self._compute_entity_match_score(query_lower, entity)
+            if score > 0:
+                # Get aliases for context
+                aliases = self.db.get_aliases(entity.id)
+                alias_names = [a.alias_text for a in aliases[:5]]
+
+                candidates.append({
+                    'id': entity.id,
+                    'canonical_name': entity.canonical_name,
+                    'type': entity.type,
+                    'confidence': score,
+                    'aliases': alias_names,
+                    'properties': entity.properties
+                })
+
+        # Sort by confidence
+        candidates.sort(key=lambda x: -x['confidence'])
+        return candidates[:10]
+
+    def _compute_entity_match_score(self, query_lower: str, entity) -> float:
+        """Compute how well an entity matches the query."""
+        entity_name = entity.canonical_name.lower()
+        score = 0.0
+
+        # Exact match
+        if query_lower == entity_name:
+            return 1.0
+
+        # Normalized exact match (remove common suffixes like Inc, LLC, Ltd)
+        def normalize(s):
+            s = s.lower()
+            for suffix in [' inc', ' inc.', ' llc', ' ltd', ' ltd.', ' corp', ' corp.',
+                          ' corporation', ' aerospace', ' group', ' company', ' co.']:
+                s = s.replace(suffix, '')
+            return s.strip()
+
+        if normalize(query_lower) == normalize(entity_name):
+            return 0.95
+
+        # Acronym match (e.g., "CITIOM" matches "Channel IT Isle of Man")
+        if len(query_lower) <= 10 and query_lower.isupper():
+            words = entity_name.split()
+            acronym = ''.join(w[0].upper() for w in words if w)
+            if query_lower.upper() == acronym:
+                return 0.9
+
+        # Substring match
+        if query_lower in entity_name:
+            # Score based on how much of the name is covered
+            score = len(query_lower) / len(entity_name) * 0.7
+        elif entity_name in query_lower:
+            score = len(entity_name) / len(query_lower) * 0.6
+
+        # Word overlap
+        query_words = set(query_lower.split())
+        entity_words = set(entity_name.split())
+        overlap = len(query_words & entity_words)
+        if overlap > 0:
+            word_score = overlap / max(len(query_words), len(entity_words)) * 0.5
+            score = max(score, word_score)
+
+        # Check aliases
+        aliases = self.db.get_aliases(entity.id)
+        for alias in aliases:
+            alias_lower = alias.alias_text.lower()
+            if query_lower == alias_lower:
+                score = max(score, 0.85)
+            elif query_lower in alias_lower or alias_lower in query_lower:
+                score = max(score, 0.6)
+
+        return score
+
+    def resolve_entity_references(self, entities_mentioned: List[str]) -> List[Dict[str, Any]]:
+        """
+        Resolve a list of entity name references to their best canonical matches.
+
+        For each mentioned entity, finds the best matching canonical entity.
+        """
+        resolved = []
+
+        for name in entities_mentioned:
+            candidates = self.disambiguate_entity(name)
+
+            if candidates:
+                best = candidates[0]
+                resolved.append({
+                    'mentioned': name,
+                    'resolved_id': best['id'],
+                    'resolved_name': best['canonical_name'],
+                    'type': best['type'],
+                    'confidence': best['confidence'],
+                    'alternatives': candidates[1:3]  # Include next 2 alternatives
+                })
+            else:
+                resolved.append({
+                    'mentioned': name,
+                    'resolved_id': None,
+                    'resolved_name': None,
+                    'type': None,
+                    'confidence': 0.0,
+                    'alternatives': []
+                })
+
+        return resolved
+
     def _rate_limit(self):
         """Enforce rate limiting between API calls."""
         elapsed = time.time() - self.last_request_time
@@ -554,17 +676,32 @@ Output as JSON array:
         entities = []
         edges = []
         facts = []
+        entity_ids_seen = set()
 
         query_type = interpretation.get('query_type', 'entity_search')
         mentioned = interpretation.get('entities_mentioned', [])
         operations = interpretation.get('graph_operations', [])
         entity_types_requested = interpretation.get('entity_types_requested', [])
 
-        # Search for mentioned entities
+        # Use disambiguation to find mentioned entities
         for name in mentioned:
             if isinstance(name, str):
-                found = self.db.search_entities_by_name(name, limit=10)
-                entities.extend(found)
+                # Use disambiguation for better matching
+                candidates = self.disambiguate_entity(name)
+                for cand in candidates[:3]:  # Top 3 matches for each mention
+                    if cand['confidence'] > 0.3 and cand['id'] not in entity_ids_seen:
+                        entity = self.db.get_entity(cand['id'])
+                        if entity:
+                            entities.append(entity)
+                            entity_ids_seen.add(cand['id'])
+
+                # Fall back to simple search if no disambiguation results
+                if not candidates:
+                    found = self.db.search_entities_by_name(name, limit=10)
+                    for entity in found:
+                        if entity.id not in entity_ids_seen:
+                            entities.append(entity)
+                            entity_ids_seen.add(entity.id)
 
         # If no entities found but specific types requested, get entities by type
         if not entities and entity_types_requested:
