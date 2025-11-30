@@ -1543,3 +1543,127 @@ SAMPLE ENTITIES:
             end_year = years[0]
 
         return self.temporal_query(start_year=start_year, end_year=end_year)
+
+    def generate_narrative_timeline(self, start_year: int = None, end_year: int = None) -> Dict[str, Any]:
+        """
+        Generate a lawyer-friendly narrative timeline of the case.
+
+        Returns structured timeline with events and an LLM-generated narrative summary.
+        """
+        # Get temporal data
+        temporal_data = self.temporal_query(start_year=start_year, end_year=end_year)
+
+        if not temporal_data['timeline']:
+            return {
+                'timeline': [],
+                'narrative': 'No dated events found in the specified time range.',
+                'key_dates': [],
+                'date_range': {'start': start_year, 'end': end_year}
+            }
+
+        # Extract key events with descriptions
+        key_events = []
+        for item in temporal_data['timeline'][:50]:  # Limit for LLM context
+            date = item['date']
+            date_str = f"{date['year']}-{date['month']:02d}-{date['day']:02d}"
+
+            event = {
+                'date': date_str,
+                'year': date['year'],
+                'description': item['name'][:150],
+                'type': item.get('type', 'event'),
+                'fact_type': item.get('fact_type', '')
+            }
+            key_events.append(event)
+
+        # Sort by date
+        key_events.sort(key=lambda x: x['date'])
+
+        # Build timeline text for LLM
+        timeline_text = "\n".join([
+            f"- {e['date']}: {e['description']}" +
+            (f" [{e['fact_type']}]" if e.get('fact_type') else "")
+            for e in key_events[:40]
+        ])
+
+        # Generate narrative summary using LLM
+        prompt = f"""You are a legal analyst creating a chronological narrative of a legal case.
+
+Based on the following timeline of events, create a clear, professional narrative summary suitable for a legal brief or case summary.
+
+TIMELINE:
+{timeline_text}
+
+Instructions:
+1. Organize events into logical phases (e.g., "Background", "Dispute", "Proceedings")
+2. Use professional legal language
+3. Highlight key milestones and turning points
+4. Note any significant time gaps or delays
+5. Keep the narrative concise but comprehensive (3-5 paragraphs)
+
+Generate the narrative timeline:"""
+
+        try:
+            narrative_config = genai.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=1500,
+            )
+            narrative = self._call_with_retry(prompt, narrative_config)
+        except Exception as e:
+            print(f"  Error generating narrative: {e}")
+            narrative = "Timeline data available but narrative generation failed."
+
+        # Identify key milestone dates
+        key_dates = []
+        seen_years = set()
+        for event in key_events:
+            if event['year'] not in seen_years:
+                key_dates.append({
+                    'date': event['date'],
+                    'description': event['description'][:100]
+                })
+                seen_years.add(event['year'])
+
+        return {
+            'timeline': key_events,
+            'narrative': narrative.strip(),
+            'key_dates': key_dates[:10],
+            'total_events': len(temporal_data['timeline']),
+            'date_range': {
+                'start': min(e['year'] for e in key_events) if key_events else None,
+                'end': max(e['year'] for e in key_events) if key_events else None
+            }
+        }
+
+    def suggest_related_questions(self, query: str, answer: str) -> List[str]:
+        """
+        Suggest follow-up questions based on the query and answer.
+
+        Returns a list of related questions that a lawyer might ask next.
+        """
+        prompt = f"""Based on this legal knowledge graph query and answer, suggest 3-5 relevant follow-up questions a lawyer might ask.
+
+Original Question: {query}
+
+Answer Summary: {answer[:500]}
+
+Suggest follow-up questions that:
+1. Dig deeper into key entities mentioned
+2. Explore relationships between parties
+3. Investigate timelines or deadlines
+4. Clarify facts or allegations
+5. Compare different parties' positions
+
+Output only the questions, one per line:"""
+
+        try:
+            config = genai.GenerationConfig(
+                temperature=0.5,
+                max_output_tokens=300,
+            )
+            response = self._call_with_retry(prompt, config)
+            questions = [q.strip().lstrip('0123456789.-) ') for q in response.strip().split('\n') if q.strip()]
+            return questions[:5]
+        except Exception as e:
+            print(f"  Error generating suggestions: {e}")
+            return []

@@ -2151,6 +2151,69 @@ def api_resolve_entities():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Narrative Timeline ====================
+
+@api.route('/narrative-timeline')
+def api_narrative_timeline():
+    """
+    Generate a lawyer-friendly narrative timeline of the case.
+
+    Query params:
+        start_year: Optional start year filter
+        end_year: Optional end year filter
+    """
+    start_year = request.args.get('start_year', type=int)
+    end_year = request.args.get('end_year', type=int)
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        result = query_engine.generate_narrative_timeline(start_year=start_year, end_year=end_year)
+
+        return jsonify(result)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/related-questions', methods=['POST'])
+def api_related_questions():
+    """
+    Suggest follow-up questions based on a query and answer.
+
+    Request body:
+        query: The original query
+        answer: The answer that was provided
+    """
+    data = request.get_json()
+    if not data or 'query' not in data:
+        return jsonify({'error': 'Missing required field: query'}), 400
+
+    query = data['query']
+    answer = data.get('answer', '')
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        suggestions = query_engine.suggest_related_questions(query, answer)
+
+        return jsonify({
+            'original_query': query,
+            'suggestions': suggestions
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== App Factory ====================
 
 def create_app(matter_name: str, api_key: str = GEMINI_API_KEY) -> Flask:
