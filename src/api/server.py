@@ -2214,6 +2214,139 @@ def api_related_questions():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Inference API Endpoints ====================
+
+@api.route('/inference/important-entities', methods=['GET'])
+def api_important_entities():
+    """
+    Get the most important entities using PageRank-style scoring.
+
+    Query params:
+        types: Comma-separated list of entity types (e.g., "Person,Organization")
+        top_k: Number of results (default 20)
+    """
+    types_param = request.args.get('types', '')
+    top_k = request.args.get('top_k', 20, type=int)
+
+    entity_types = [t.strip() for t in types_param.split(',') if t.strip()] or None
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        results = query_engine.get_important_entities(entity_types=entity_types, top_k=top_k)
+
+        return jsonify({
+            'entities': results,
+            'count': len(results),
+            'types_filter': entity_types
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/inference/fact-reliability', methods=['GET'])
+def api_fact_reliability():
+    """
+    Get fact reliability scores based on corroboration analysis.
+
+    Query params:
+        top_k: Number of facts to analyze (default 30)
+    """
+    top_k = request.args.get('top_k', 30, type=int)
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        results = query_engine.get_fact_reliability(top_k=top_k)
+
+        return jsonify({
+            'facts': results,
+            'count': len(results)
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/inference/inferred-relationships', methods=['GET'])
+def api_inferred_relationships():
+    """
+    Get inferred (implicit) relationships for an entity.
+
+    Query params:
+        entity: Name of the entity to analyze
+    """
+    entity_name = request.args.get('entity', '')
+    if not entity_name:
+        return jsonify({'error': 'Missing required parameter: entity'}), 400
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        results = query_engine.get_inferred_relationships(entity_name)
+
+        return jsonify({
+            'entity': entity_name,
+            'inferred_relationships': results,
+            'count': len(results)
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/inference/resolve-entity', methods=['POST'])
+def api_resolve_entity_bayesian():
+    """
+    Resolve an entity name with Bayesian confidence scoring.
+
+    Request body:
+        name: The name to resolve
+        type: Optional entity type filter
+        context: Optional list of context strings
+    """
+    data = request.get_json()
+    if not data or 'name' not in data:
+        return jsonify({'error': 'Missing required field: name'}), 400
+
+    name = data['name']
+    entity_type = data.get('type')
+    context = data.get('context', [])
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        candidates = query_engine.resolve_entity_with_confidence(
+            name, entity_type=entity_type, context=context
+        )
+
+        return jsonify({
+            'query_name': name,
+            'candidates': candidates,
+            'count': len(candidates)
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== App Factory ====================
 
 def create_app(matter_name: str, api_key: str = GEMINI_API_KEY) -> Flask:

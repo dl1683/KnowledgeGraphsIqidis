@@ -19,6 +19,7 @@ from ..storage.database import Database
 from ..storage.models import Entity, Edge
 from ..embeddings.vector_store import VectorStore, EmbeddingGenerator
 from ..config import GEMINI_API_KEY, GEMINI_MODEL
+from ..inference.graph_inference import GraphInference
 
 # Rate limiting
 MIN_DELAY_BETWEEN_REQUESTS = 4.5  # seconds
@@ -206,6 +207,7 @@ Output as JSON array:
         self.model = genai.GenerativeModel(GEMINI_MODEL)
         self.embedding_generator = EmbeddingGenerator(api_key)
         self.last_request_time = 0
+        self.inference = GraphInference(db)  # Probabilistic inference engine
 
         self.generation_config = genai.GenerationConfig(
             temperature=0.2,
@@ -546,6 +548,10 @@ Output as JSON array:
         print("\n[3/3] Generating answer...")
         answer = self._generate_answer(question, entities, edges, facts)
 
+        # Calculate answer confidence using Bayesian inference
+        confidence_result = self.inference.score_answer_confidence(entities, facts, edges)
+        confidence = confidence_result['confidence']
+
         return QueryResult(
             query=question,
             interpretation=interpretation.get('query_type', 'unknown'),
@@ -553,7 +559,7 @@ Output as JSON array:
             edges=[e.to_dict() if hasattr(e, 'to_dict') else e for e in edges],
             facts=[f for f in facts],
             answer=answer,
-            confidence=0.8
+            confidence=confidence
         )
 
     def _interpret_query(self, query: str) -> Dict[str, Any]:
@@ -1769,3 +1775,87 @@ Output only the questions, one per line:"""
         except Exception as e:
             print(f"  Error generating suggestions: {e}")
             return []
+
+    # ========== INFERENCE METHODS ==========
+
+    def get_important_entities(self, entity_types: List[str] = None, top_k: int = 20) -> List[Dict]:
+        """
+        Get the most important entities using PageRank-style importance scoring.
+
+        Args:
+            entity_types: Filter to specific types (e.g., ['Person', 'Organization'])
+            top_k: Number of top entities to return
+
+        Returns:
+            List of entity importance info
+        """
+        importance = self.inference.compute_entity_importance(
+            entity_types=entity_types,
+            iterations=15
+        )
+        return [{
+            'entity_id': e.entity_id,
+            'name': e.entity_name,
+            'type': e.entity_type,
+            'importance_score': round(e.score, 4),
+            'in_degree': e.components.get('in_degree', 0),
+            'out_degree': e.components.get('out_degree', 0)
+        } for e in importance[:top_k]]
+
+    def get_fact_reliability(self, top_k: int = 30) -> List[Dict]:
+        """
+        Get fact reliability scores based on corroboration analysis.
+
+        Returns:
+            List of facts with reliability scores
+        """
+        corroboration = self.inference.assess_fact_corroboration(top_k=top_k)
+        return [{
+            'fact_id': f.fact_id,
+            'text': f.fact_text,
+            'type': f.fact_type,
+            'reliability_score': round(f.corroboration_score, 3),
+            'source_count': f.source_count,
+            'has_contradictions': len(f.contradicting_facts) > 0
+        } for f in corroboration]
+
+    def get_inferred_relationships(self, entity_name: str) -> List[Dict]:
+        """
+        Get inferred (implicit) relationships for an entity.
+
+        Args:
+            entity_name: Name of the entity to analyze
+
+        Returns:
+            List of inferred relationships with confidence
+        """
+        matches = self.db.search_entities_by_name(entity_name, limit=1)
+        if not matches:
+            return []
+
+        entity = matches[0]
+        inferred = self.inference.infer_relationships(entity.id, max_hops=2)
+        return inferred
+
+    def resolve_entity_with_confidence(self, name: str, entity_type: str = None,
+                                        context: List[str] = None) -> List[Dict]:
+        """
+        Resolve an entity name with Bayesian confidence scoring.
+
+        Args:
+            name: The name to resolve
+            entity_type: Optional filter by type
+            context: Optional context for disambiguation
+
+        Returns:
+            List of candidates with probability scores
+        """
+        candidates = self.inference.resolve_entity_bayesian(
+            name, entity_type=entity_type, context=context
+        )
+        return [{
+            'entity_id': c.entity_id,
+            'name': c.canonical_name,
+            'probability': round(c.probability, 4),
+            'evidence': c.evidence
+        } for c in candidates[:10]]
