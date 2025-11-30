@@ -1322,6 +1322,213 @@ def api_shortest_path():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Relationship Analysis ====================
+
+@api.route('/relationship-analysis')
+def api_relationship_analysis():
+    """Analyze relationship patterns in the graph."""
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get all edges with entity info
+        cursor.execute('''
+            SELECT e.relation_type,
+                   e.source_entity_id, e.target_entity_id,
+                   src.type as source_type, tgt.type as target_type
+            FROM edges e
+            LEFT JOIN entities src ON e.source_entity_id = src.id
+            LEFT JOIN entities tgt ON e.target_entity_id = tgt.id
+        ''')
+        edges = [dict(row) for row in cursor.fetchall()]
+
+        # Analyze relationship types
+        relation_counts = {}
+        relation_patterns = {}  # (source_type, relation, target_type) -> count
+
+        for edge in edges:
+            rel = edge['relation_type']
+            src_type = edge['source_type'] or 'Unknown'
+            tgt_type = edge['target_type'] or 'Unknown'
+
+            relation_counts[rel] = relation_counts.get(rel, 0) + 1
+
+            pattern = f"{src_type} -[{rel}]-> {tgt_type}"
+            relation_patterns[pattern] = relation_patterns.get(pattern, 0) + 1
+
+        # Sort by count
+        sorted_relations = sorted(relation_counts.items(), key=lambda x: -x[1])
+        sorted_patterns = sorted(relation_patterns.items(), key=lambda x: -x[1])
+
+        # Find bidirectional relationships
+        bidirectional_pairs = []
+        edge_pairs = {}
+        for edge in edges:
+            src, tgt, rel = edge['source_entity_id'], edge['target_entity_id'], edge['relation_type']
+            key = (min(src, tgt), max(src, tgt))
+            if key not in edge_pairs:
+                edge_pairs[key] = []
+            edge_pairs[key].append((src, tgt, rel))
+
+        for key, pair_edges in edge_pairs.items():
+            if len(pair_edges) > 1:
+                bidirectional_pairs.append({
+                    'entity_pair': key,
+                    'relationships': [{'source': e[0], 'target': e[1], 'relation': e[2]} for e in pair_edges]
+                })
+
+        # Get entity type distribution
+        cursor.execute('''
+            SELECT type, COUNT(*) as count
+            FROM entities
+            GROUP BY type
+            ORDER BY count DESC
+        ''')
+        entity_type_dist = [dict(row) for row in cursor.fetchall()]
+
+        return jsonify({
+            'total_relationships': len(edges),
+            'unique_relation_types': len(relation_counts),
+            'relation_type_counts': [{'type': r, 'count': c} for r, c in sorted_relations],
+            'top_patterns': [{'pattern': p, 'count': c} for p, c in sorted_patterns[:30]],
+            'bidirectional_count': len(bidirectional_pairs),
+            'entity_type_distribution': entity_type_dist
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== Similar Entities (Embedding-based) ====================
+
+@api.route('/similar/<entity_id>')
+def api_similar_entities(entity_id):
+    """Find entities similar to a given entity using embeddings."""
+    limit = int(request.args.get('limit', 10))
+    threshold = float(request.args.get('threshold', 0.5))
+
+    try:
+        kg = get_kg()
+        exp = get_exporter()
+
+        # Get the entity
+        cursor = exp.conn.cursor()
+        cursor.execute('SELECT id, canonical_name, type, properties FROM entities WHERE id = ?',
+                      (entity_id,))
+        entity_row = cursor.fetchone()
+
+        if not entity_row:
+            return jsonify({'error': 'Entity not found'}), 404
+
+        entity = dict(entity_row)
+
+        # Get similar entities from vector store
+        from ..core.embeddings.vector_store import EmbeddingGenerator
+
+        embedding_gen = EmbeddingGenerator()
+
+        # Generate embedding for search
+        search_text = f"{entity['canonical_name']} {entity['type']}"
+        query_embedding = embedding_gen.generate_query_embedding(search_text)
+
+        # Search vector store
+        similar = kg.vector_store.search(query_embedding, k=limit + 1)  # +1 to exclude self
+
+        # Get entity details for results
+        similar_entities = []
+        for sim_id, score in similar:
+            if sim_id == entity_id:
+                continue
+            if score < threshold:
+                continue
+
+            cursor.execute('SELECT id, canonical_name, type, properties, confidence FROM entities WHERE id = ?',
+                          (sim_id,))
+            sim_row = cursor.fetchone()
+            if sim_row:
+                sim_entity = dict(sim_row)
+                similar_entities.append({
+                    'entity_id': sim_id,
+                    'name': sim_entity['canonical_name'],
+                    'type': sim_entity['type'],
+                    'confidence': sim_entity['confidence'],
+                    'similarity_score': round(score, 4)
+                })
+
+        return jsonify({
+            'source_entity': {
+                'id': entity_id,
+                'name': entity['canonical_name'],
+                'type': entity['type']
+            },
+            'similar_entities': similar_entities[:limit]
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/similar-by-name')
+def api_similar_by_name():
+    """Find entities similar to a text query using embeddings."""
+    query = request.args.get('query', '')
+    limit = int(request.args.get('limit', 10))
+    entity_type = request.args.get('type')
+
+    if not query:
+        return jsonify({'error': 'query parameter required'}), 400
+
+    try:
+        kg = get_kg()
+        exp = get_exporter()
+
+        from ..core.embeddings.vector_store import EmbeddingGenerator
+        embedding_gen = EmbeddingGenerator()
+
+        # Generate embedding for query
+        search_text = f"{query} {entity_type}" if entity_type else query
+        query_embedding = embedding_gen.generate_query_embedding(search_text)
+
+        # Search vector store
+        similar = kg.vector_store.search(query_embedding, k=limit * 2)  # Get extra for filtering
+
+        # Get entity details
+        cursor = exp.conn.cursor()
+        results = []
+        for sim_id, score in similar:
+            cursor.execute('SELECT id, canonical_name, type, properties, confidence FROM entities WHERE id = ?',
+                          (sim_id,))
+            row = cursor.fetchone()
+            if row:
+                entity = dict(row)
+                # Filter by type if specified
+                if entity_type and entity['type'] != entity_type:
+                    continue
+                results.append({
+                    'entity_id': sim_id,
+                    'name': entity['canonical_name'],
+                    'type': entity['type'],
+                    'confidence': entity['confidence'],
+                    'similarity_score': round(score, 4)
+                })
+                if len(results) >= limit:
+                    break
+
+        return jsonify({
+            'query': query,
+            'results': results
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== Entity Importance Scoring ====================
 
 @api.route('/importance')
