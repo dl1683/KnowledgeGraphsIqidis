@@ -41,6 +41,11 @@ class QueryResult:
 class NLQueryEngine:
     """Natural language query engine for the knowledge graph."""
 
+    # Cache for schema (regenerate every N queries)
+    _schema_cache = None
+    _schema_cache_query_count = 0
+    SCHEMA_CACHE_REFRESH_INTERVAL = 50  # Refresh schema every 50 queries
+
     # Complex query decomposition prompt
     QUERY_DECOMPOSITION_PROMPT = """You are an expert at breaking down complex legal questions into simpler sub-queries.
 
@@ -86,7 +91,7 @@ Output only the JSON array:"""
 
 2. ENTITIES_MENTIONED: Extract any entity names or types mentioned
 
-3. RELATION_TYPES: Any relationship types implied (represents, party_to, signed, etc.)
+3. RELATION_TYPES: Any relationship types implied
 
 4. FILTERS: Any constraints (entity types, confidence levels, etc.)
 
@@ -99,26 +104,55 @@ Output only the JSON array:"""
 
 User Question: {query}
 
-Available entity types: Person, Organization, Document, Clause, Date, Money, Location, Reference, Fact
-Available relation types: represents, party_to, signed, employed_by, affiliated_with, testified, references, mentioned_in, about, binds, related_to
+=== CURRENT GRAPH SCHEMA ===
+{schema}
 
 Output JSON with the analysis:
 """
 
-    ANSWER_GENERATION_PROMPT = """You are a legal assistant answering questions based on knowledge graph data.
+    ANSWER_GENERATION_PROMPT = """You are a legal assistant answering questions based on knowledge graph data from legal documents.
 
 User's Question: {query}
 
-Graph Data Retrieved:
-{graph_data}
+ENTITIES FOUND:
+{entities}
 
-Based on the retrieved data, provide a clear, comprehensive answer to the user's question.
-- Be specific and cite entity names
-- If relationships exist, explain them
-- If the data is incomplete, say so
-- Format the answer clearly
+RELATIONSHIPS:
+{relationships}
+
+KEY FACTS:
+{facts}
+
+Instructions:
+1. Synthesize a clear, comprehensive answer using the data above
+2. ALWAYS cite specific entity names and facts
+3. Group related information logically
+4. For legal questions, note relevant parties, dates, and amounts
+5. If data seems incomplete, note what information is missing
+6. Use bullet points for lists of items
+7. Highlight key findings or conclusions
 
 Answer:
+"""
+
+    # Enhanced fact synthesis prompt
+    FACT_SYNTHESIS_PROMPT = """Based on these extracted facts from legal documents, synthesize a coherent answer.
+
+Question: {query}
+
+Relevant Facts:
+{facts}
+
+Related Entities:
+{entities}
+
+Synthesize these facts into a clear narrative answer that:
+1. Groups related facts together
+2. Identifies any contradictions or conflicts
+3. Highlights key dates, amounts, and obligations
+4. Notes the source/type of each fact when relevant
+
+Synthesized Answer:
 """
 
     SCHEMA_EXPLORATION_PROMPT = """You are a knowledge graph query planner. The user's query returned no direct results.
@@ -159,6 +193,50 @@ Output as JSON array:
             top_p=0.95,
             max_output_tokens=4096,
         )
+
+    def _get_live_schema(self, force_refresh: bool = False) -> str:
+        """Get live schema from the database (cached)."""
+        NLQueryEngine._schema_cache_query_count += 1
+
+        if (NLQueryEngine._schema_cache is None or
+            force_refresh or
+            NLQueryEngine._schema_cache_query_count >= self.SCHEMA_CACHE_REFRESH_INTERVAL):
+
+            NLQueryEngine._schema_cache_query_count = 0
+
+            # Get entity type counts
+            stats = self.db.get_stats()
+            entity_types = stats.get('entities_by_type', {})
+            edge_types = stats.get('edges_by_type', {})
+
+            # Build schema string
+            schema_parts = []
+
+            # Entity types
+            schema_parts.append("ENTITY TYPES:")
+            for etype, count in sorted(entity_types.items(), key=lambda x: -x[1]):
+                schema_parts.append(f"  - {etype}: {count} entities")
+
+            # Top relationship types (limit to top 30)
+            schema_parts.append("\nRELATIONSHIP TYPES:")
+            sorted_edges = sorted(edge_types.items(), key=lambda x: -x[1])[:30]
+            for rtype, count in sorted_edges:
+                schema_parts.append(f"  - {rtype}: {count} edges")
+
+            # Get sample entity names for key types
+            schema_parts.append("\nKEY ENTITIES (samples):")
+            for etype in ['Organization', 'Person', 'Document']:
+                entities = self.db.get_entities_by_type(etype, limit=5)
+                if entities:
+                    names = [e.canonical_name for e in entities]
+                    schema_parts.append(f"  {etype}s: {', '.join(names)}")
+
+            # Total counts
+            schema_parts.append(f"\nTOTALS: {stats.get('total_entities', 0)} entities, {stats.get('total_edges', 0)} relationships")
+
+            NLQueryEngine._schema_cache = "\n".join(schema_parts)
+
+        return NLQueryEngine._schema_cache
 
     def _rate_limit(self):
         """Enforce rate limiting between API calls."""
@@ -342,7 +420,10 @@ Output as JSON array:
         # Always get fallback interpretation first
         fallback = self._fallback_interpretation(query)
 
-        prompt = self.QUERY_INTERPRETATION_PROMPT.format(query=query)
+        # Get live schema for context
+        schema = self._get_live_schema()
+
+        prompt = self.QUERY_INTERPRETATION_PROMPT.format(query=query, schema=schema)
 
         try:
             response_text = self._call_with_retry(prompt)
@@ -960,38 +1041,52 @@ SAMPLE ENTITIES:
 
     def _generate_answer(self, query: str, entities: List[Entity], edges: List[Edge], facts: List[Dict]) -> str:
         """Generate natural language answer from graph data."""
-        # Format graph data for LLM
-        graph_data_parts = []
-
+        # Format entities
+        entities_str = ""
         if entities:
-            graph_data_parts.append("ENTITIES FOUND:")
-            for e in entities[:20]:
+            entity_lines = []
+            for e in entities[:25]:
                 props = e.properties if hasattr(e, 'properties') else {}
-                graph_data_parts.append(f"  - {e.canonical_name} (Type: {e.type}, Confidence: {e.confidence})")
-                if props:
-                    for k, v in list(props.items())[:3]:
-                        graph_data_parts.append(f"      {k}: {str(v)[:100]}")
+                line = f"- {e.canonical_name} ({e.type})"
+                if props.get('role'):
+                    line += f" - Role: {props['role']}"
+                entity_lines.append(line)
+            entities_str = "\n".join(entity_lines)
+        else:
+            entities_str = "None found"
 
+        # Format relationships
+        relationships_str = ""
         if edges:
-            graph_data_parts.append("\nRELATIONSHIPS FOUND:")
-            for edge in edges[:20]:
+            rel_lines = []
+            for edge in edges[:25]:
                 source = self.db.get_entity(edge.source_entity_id)
                 target = self.db.get_entity(edge.target_entity_id)
-                source_name = source.canonical_name if source else edge.source_entity_id
-                target_name = target.canonical_name if target else edge.target_entity_id
-                graph_data_parts.append(f"  - {source_name} --[{edge.relation_type}]--> {target_name}")
+                source_name = source.canonical_name if source else "Unknown"
+                target_name = target.canonical_name if target else "Unknown"
+                rel_lines.append(f"- {source_name} --[{edge.relation_type}]--> {target_name}")
+            relationships_str = "\n".join(rel_lines)
+        else:
+            relationships_str = "None found"
 
+        # Format facts
+        facts_str = ""
         if facts:
-            graph_data_parts.append("\nFACTS FOUND:")
-            for f in facts[:10]:
-                graph_data_parts.append(f"  - [{f.get('type', 'fact')}]: {f.get('text', '')[:200]}")
+            fact_lines = []
+            for f in facts[:15]:
+                fact_type = f.get('type', f.get('fact_type', 'fact'))
+                text = f.get('text', f.get('full_text', ''))[:250]
+                fact_lines.append(f"- [{fact_type}] {text}")
+            facts_str = "\n".join(fact_lines)
+        else:
+            facts_str = "None found"
 
-        graph_data = "\n".join(graph_data_parts) if graph_data_parts else "No relevant data found in the knowledge graph."
-
-        # Generate answer
+        # Generate answer with structured prompt
         prompt = self.ANSWER_GENERATION_PROMPT.format(
             query=query,
-            graph_data=graph_data
+            entities=entities_str,
+            relationships=relationships_str,
+            facts=facts_str
         )
 
         try:
