@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
 import google.generativeai as genai
+from json_repair import repair_json
 
 from ..config import GEMINI_API_KEY, GEMINI_MODEL
 
@@ -66,52 +67,22 @@ class SemanticExtractor:
 
     # Unified extraction prompt - extracts everything in one API call
     # Note: {{ and }} are escaped braces for Python's str.format()
-    UNIFIED_EXTRACTION_PROMPT = """You are a legal document analyzer. Extract ALL entities, relationships, and facts from the following text in a SINGLE response.
+    UNIFIED_EXTRACTION_PROMPT = """Extract entities, relationships, and facts from this legal text. Be CONCISE - only include the most important items.
 
-OUTPUT FORMAT - Return a JSON object with three arrays:
-{{
-  "entities": [...],
-  "relations": [...],
-  "facts": [...]
-}}
+OUTPUT FORMAT (JSON only, no markdown):
+{{"entities":[...],"relations":[...],"facts":[...]}}
 
-=== ENTITIES ===
-For each entity, provide:
-- name: Canonical name
-- type: One of [Person, Organization, Location, Money, Date, Reference]
-- properties: Relevant attributes (role, title, amount, currency, etc.)
-- span_text: Exact text where entity appears
+ENTITIES (max 50): name, type (Person/Organization/Location/Money/Date/Reference), properties, span_text
+RELATIONS (max 50): source_name, target_name, relation_type (represents/party_to/signed/employed_by/affiliated_with/testified/references/binds/related_to), properties
+FACTS (max 50): fact_type (obligation/admission/deadline/key_term/allegation/finding/quote), text (brief), related_entities, properties
 
-Entity Types:
-- Person: Individuals mentioned by name
-- Organization: Companies, firms, courts, agencies
-- Location: Cities, states, countries, addresses
-- Money: Dollar amounts, fees, damages
-- Date: Specific dates
-- Reference: Citations to cases, statutes, exhibits
-
-=== RELATIONS ===
-For each relationship, provide:
-- source_name: Source entity name
-- target_name: Target entity name
-- relation_type: One of [represents, party_to, signed, employed_by, affiliated_with, testified, references, mentioned_in, about, binds, related_to]
-- properties: Details about the relationship
-
-=== FACTS ===
-For each fact, provide:
-- fact_type: One of [obligation, admission, deadline, key_term, allegation, finding, quote]
-- text: The relevant text (verbatim or summarized)
-- related_entities: List of entity names this fact relates to
-- properties: Additional details
-
-TEXT TO ANALYZE:
+TEXT:
 {text}
 
-EXISTING ENTITIES (link to these if mentioned, avoid duplicates):
+EXISTING ENTITIES (reference these, avoid duplicates):
 {existing_entities}
 
-Output ONLY valid JSON with entities, relations, and facts arrays:
-"""
+Output compact JSON only:"""
 
     ENTITY_EXTRACTION_PROMPT = """You are a legal document analyzer. Extract all entities from the following text chunk.
 
@@ -250,10 +221,10 @@ Output only valid JSON array of facts:
 
     def _extract_unified(self, text: str, existing_entities: List[str]) -> SemanticExtraction:
         """Extract everything in a single API call for efficiency."""
-        existing_str = "\n".join(f"- {e}" for e in existing_entities[:100]) if existing_entities else "None"
+        existing_str = ", ".join(existing_entities[:50]) if existing_entities else "None"
 
-        # For large chunks, we can pass more text since Gemini has large context
-        max_text_len = 50000  # ~20K tokens
+        # Reduced text length to prevent response truncation
+        max_text_len = 25000  # ~10K tokens - smaller to fit response in output limit
 
         prompt = self.UNIFIED_EXTRACTION_PROMPT.format(
             text=text[:max_text_len],
@@ -285,7 +256,7 @@ Output only valid JSON array of facts:
             return SemanticExtraction(entities=[], relations=[], facts=[])
 
     def _parse_unified_response(self, response_text: str) -> Dict[str, List]:
-        """Parse unified extraction response with robust JSON handling."""
+        """Parse unified extraction response with robust JSON handling using json_repair."""
         result = {'entities': [], 'relations': [], 'facts': []}
 
         if not response_text:
@@ -295,23 +266,18 @@ Output only valid JSON array of facts:
 
         # Remove markdown code blocks if present
         if '```' in text:
-            # Find content between ``` markers
-            import re as _re
-            code_match = _re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+            code_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
             if code_match:
                 text = code_match.group(1)
             else:
-                # Fallback: strip ``` lines
                 lines = text.split('\n')
                 filtered = [l for l in lines if not l.strip().startswith('```')]
                 text = '\n'.join(filtered)
 
-        # Strip whitespace after removing code blocks
         text = text.strip()
 
-        # Handle response that doesn't start with { (common Gemini behavior)
+        # Handle response that doesn't start with {
         if not text.startswith('{'):
-            # Find the first JSON key
             first_key_pos = -1
             for key in ['"entities"', '"relations"', '"facts"']:
                 pos = text.find(key)
@@ -319,67 +285,58 @@ Output only valid JSON array of facts:
                     first_key_pos = pos
 
             if first_key_pos != -1:
-                # Wrap from the first key onwards with opening brace
                 text = '{' + text[first_key_pos:]
             elif text.startswith('['):
-                # It's an array - wrap as entities
                 text = '{"entities": ' + text + '}'
 
-        # Ensure closing brace if we have opening
-        if text.startswith('{'):
-            # Count braces to ensure proper closing
-            open_braces = text.count('{')
-            close_braces = text.count('}')
-            if open_braces > close_braces:
-                text = text.rstrip() + '}' * (open_braces - close_braces)
-
-        # Try parsing the JSON
+        # Use json_repair to fix truncated/malformed JSON
         try:
-            parsed = json.loads(text)
+            repaired = repair_json(text, return_objects=True)
+            if isinstance(repaired, dict):
+                parsed = repaired
+            else:
+                # If repair returns a string, try parsing it
+                parsed = json.loads(repaired) if isinstance(repaired, str) else {}
+        except Exception as repair_error:
+            # Fallback: try standard JSON parsing
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as e:
+                print(f"JSON parse error (repair failed): {e}")
+                return result
 
-            # Extract entities
-            for e in parsed.get('entities', []):
-                if isinstance(e, dict):
-                    result['entities'].append(ExtractedEntity(
-                        name=e.get('name', ''),
-                        type=e.get('type', 'Unknown'),
-                        properties=e.get('properties', {}),
-                        span_text=e.get('span_text', e.get('name', '')),
-                        confidence=e.get('confidence', 0.8)
-                    ))
+        # Extract entities
+        for e in parsed.get('entities', []):
+            if isinstance(e, dict) and e.get('name'):
+                result['entities'].append(ExtractedEntity(
+                    name=e.get('name', ''),
+                    type=e.get('type', 'Unknown'),
+                    properties=e.get('properties', {}),
+                    span_text=e.get('span_text', e.get('name', '')),
+                    confidence=e.get('confidence', 0.8)
+                ))
 
-            # Extract relations
-            for r in parsed.get('relations', []):
-                if isinstance(r, dict):
-                    result['relations'].append(ExtractedRelation(
-                        source_name=r.get('source_name', ''),
-                        target_name=r.get('target_name', ''),
-                        relation_type=r.get('relation_type', 'related_to'),
-                        properties=r.get('properties', {}),
-                        confidence=r.get('confidence', 0.7)
-                    ))
+        # Extract relations
+        for r in parsed.get('relations', []):
+            if isinstance(r, dict) and r.get('source_name') and r.get('target_name'):
+                result['relations'].append(ExtractedRelation(
+                    source_name=r.get('source_name', ''),
+                    target_name=r.get('target_name', ''),
+                    relation_type=r.get('relation_type', 'related_to'),
+                    properties=r.get('properties', {}),
+                    confidence=r.get('confidence', 0.7)
+                ))
 
-            # Extract facts
-            for f in parsed.get('facts', []):
-                if isinstance(f, dict):
-                    result['facts'].append(ExtractedFact(
-                        fact_type=f.get('fact_type', 'key_term'),
-                        text=f.get('text', ''),
-                        related_entities=f.get('related_entities', []),
-                        properties=f.get('properties', {}),
-                        confidence=f.get('confidence', 0.7)
-                    ))
-
-        except json.JSONDecodeError as e:
-            print(f"JSON parse error in unified response: {e}")
-            # Try to find JSON object in text
-            obj_match = re.search(r'\{[\s\S]*\}', text)
-            if obj_match:
-                try:
-                    parsed = json.loads(obj_match.group())
-                    return self._parse_unified_response(json.dumps(parsed))
-                except:
-                    pass
+        # Extract facts
+        for f in parsed.get('facts', []):
+            if isinstance(f, dict) and f.get('text'):
+                result['facts'].append(ExtractedFact(
+                    fact_type=f.get('fact_type', 'key_term'),
+                    text=f.get('text', ''),
+                    related_entities=f.get('related_entities', []),
+                    properties=f.get('properties', {}),
+                    confidence=f.get('confidence', 0.7)
+                ))
 
         return result
 
