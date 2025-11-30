@@ -1,0 +1,2055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Graph - CITIOM v Gulfstream</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+
+        #app {
+            display: flex;
+            height: 100vh;
+        }
+
+        /* Sidebar */
+        #sidebar {
+            width: 350px;
+            background: #16213e;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #0f3460;
+        }
+
+        .sidebar-section {
+            padding: 15px 20px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .sidebar-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px 20px;
+        }
+
+        h1 {
+            font-size: 1.3rem;
+            color: #4285f4;
+        }
+
+        h1 span {
+            font-size: 0.8rem;
+            color: #666;
+            font-weight: normal;
+        }
+
+        h2 {
+            font-size: 0.85rem;
+            margin: 15px 0 10px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Query Box */
+        #query-container {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        #query-input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            background: #16213e;
+            color: #eee;
+            font-size: 14px;
+            resize: none;
+            min-height: 60px;
+        }
+
+        #query-input:focus {
+            outline: none;
+            border-color: #4285f4;
+        }
+
+        #query-btn {
+            width: 100%;
+            margin-top: 10px;
+            padding: 10px;
+            background: #4285f4;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        #query-btn:hover {
+            background: #3367d6;
+        }
+
+        #query-btn:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+
+        #query-answer {
+            margin-top: 15px;
+            padding: 15px;
+            background: #0f3460;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+            display: none;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        #query-answer.active {
+            display: block;
+        }
+
+        #query-answer h3 {
+            color: #4285f4;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        #query-stats {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #1a1a2e;
+            font-size: 11px;
+            color: #888;
+        }
+
+        /* Search */
+        #search-container {
+            position: relative;
+        }
+
+        #search {
+            width: 100%;
+            padding: 10px 15px;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            background: #1a1a2e;
+            color: #eee;
+            font-size: 14px;
+        }
+
+        #search:focus {
+            outline: none;
+            border-color: #4285f4;
+        }
+
+        #search-results {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            max-height: 300px;
+            overflow-y: auto;
+            z-index: 1000;
+            display: none;
+        }
+
+        .search-item {
+            padding: 10px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .search-item:hover {
+            background: #0f3460;
+        }
+
+        .search-item .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        /* Filters */
+        .filter-group {
+            margin-bottom: 10px;
+        }
+
+        .filter-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 0;
+            cursor: pointer;
+        }
+
+        .filter-item input {
+            cursor: pointer;
+        }
+
+        .filter-item .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .filter-item label {
+            flex: 1;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .filter-item .count {
+            color: #666;
+            font-size: 12px;
+        }
+
+        /* Stats */
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            font-size: 13px;
+        }
+
+        .stat-label {
+            color: #888;
+        }
+
+        .stat-value {
+            font-weight: bold;
+            color: #4285f4;
+        }
+
+        /* Entity Details */
+        #entity-details {
+            margin-top: 15px;
+            padding: 15px;
+            background: #1a1a2e;
+            border-radius: 8px;
+            display: none;
+        }
+
+        #entity-details.active {
+            display: block;
+        }
+
+        #entity-details h3 {
+            font-size: 1rem;
+            margin-bottom: 10px;
+            word-break: break-word;
+        }
+
+        .type-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            margin-bottom: 10px;
+        }
+
+        #entity-connections {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .connection-item {
+            padding: 5px 0;
+            font-size: 12px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .connection-item .relation {
+            color: #888;
+            font-size: 10px;
+        }
+
+        /* Facts Panel */
+        #facts-panel {
+            margin-top: 15px;
+            display: none;
+        }
+
+        #facts-panel.active {
+            display: block;
+        }
+
+        .fact-item {
+            padding: 8px 10px;
+            background: #0f3460;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        /* Graph Container */
+        #graph-container {
+            flex: 1;
+            position: relative;
+            background: #1a1a2e;
+        }
+
+        #graph {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Controls */
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .control-btn {
+            padding: 8px 15px;
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            color: #eee;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .control-btn:hover {
+            background: #0f3460;
+        }
+
+        .control-btn.active {
+            background: #4285f4;
+            border-color: #4285f4;
+        }
+
+        /* View Mode Toggle */
+        #view-toggle {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            background: #16213e;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #0f3460;
+        }
+
+        .view-btn {
+            padding: 8px 15px;
+            background: transparent;
+            border: none;
+            color: #888;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .view-btn:hover {
+            color: #eee;
+        }
+
+        .view-btn.active {
+            background: #4285f4;
+            color: white;
+        }
+
+        /* Tooltip */
+        #tooltip {
+            position: absolute;
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 10px 15px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            max-width: 300px;
+            z-index: 1000;
+        }
+
+        #tooltip.active {
+            opacity: 1;
+        }
+
+        #tooltip h4 {
+            margin-bottom: 5px;
+            word-break: break-word;
+            font-size: 13px;
+        }
+
+        #tooltip .type {
+            font-size: 11px;
+            color: #888;
+        }
+
+        /* Loading */
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #0f3460;
+            border-top-color: #4285f4;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Sample Queries */
+        .sample-queries {
+            margin-top: 10px;
+        }
+
+        .sample-query {
+            display: inline-block;
+            padding: 5px 10px;
+            background: #0f3460;
+            border-radius: 15px;
+            font-size: 11px;
+            margin: 3px;
+            cursor: pointer;
+            color: #aaa;
+        }
+
+        .sample-query:hover {
+            background: #4285f4;
+            color: white;
+        }
+
+        /* Modal */
+        #edit-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        #edit-modal.active {
+            display: flex;
+        }
+
+        .modal-box {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 25px;
+            min-width: 400px;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-box h2 {
+            margin: 0 0 20px;
+            color: #eee;
+            font-size: 1.2rem;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: #1a1a2e;
+            color: #eee;
+            font-size: 14px;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #4285f4;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            justify-content: flex-end;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .btn-primary {
+            background: #4285f4;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #3367d6;
+        }
+
+        .btn-secondary {
+            background: #444;
+            color: #eee;
+        }
+
+        .btn-secondary:hover {
+            background: #555;
+        }
+
+        .btn-danger {
+            background: #ea4335;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c5221f;
+        }
+
+        .search-result-item {
+            padding: 8px 10px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .search-result-item:hover {
+            background: #0f3460;
+        }
+
+        #edge-target-results,
+        #merge-target-results {
+            background: #1a1a2e;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            margin-top: 5px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        /* Edit mode button */
+        .control-btn.edit-mode {
+            background: #ff6d01;
+            border-color: #ff6d01;
+        }
+
+        /* NL Edit command box */
+        #nl-edit-container {
+            margin-top: 15px;
+            padding: 10px;
+            background: #1a1a2e;
+            border-radius: 8px;
+            border: 1px dashed #ff6d01;
+        }
+
+        #nl-edit-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: #16213e;
+            color: #eee;
+            font-size: 13px;
+        }
+
+        #nl-edit-input:focus {
+            outline: none;
+            border-color: #ff6d01;
+        }
+
+        #nl-edit-btn {
+            width: 100%;
+            margin-top: 8px;
+            padding: 8px;
+            background: #ff6d01;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        #nl-edit-btn:hover {
+            background: #e55d00;
+        }
+
+        #nl-edit-btn:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+
+        .nl-edit-examples {
+            margin-top: 8px;
+            font-size: 10px;
+            color: #666;
+        }
+
+        .nl-edit-example {
+            display: inline-block;
+            padding: 3px 8px;
+            margin: 2px;
+            background: #0f3460;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+
+        .nl-edit-example:hover {
+            background: #ff6d01;
+            color: white;
+        }
+
+        #nl-edit-result {
+            margin-top: 10px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            display: none;
+        }
+
+        #nl-edit-result.success {
+            display: block;
+            background: rgba(52, 168, 83, 0.2);
+            border: 1px solid #34a853;
+            color: #34a853;
+        }
+
+        #nl-edit-result.error {
+            display: block;
+            background: rgba(234, 67, 53, 0.2);
+            border: 1px solid #ea4335;
+            color: #ea4335;
+        }
+
+        /* Layout selector */
+        #layout-container {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        #layout-container label {
+            font-size: 11px;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        #layout-select {
+            margin-top: 5px;
+            padding: 6px 10px;
+            background: #1a1a2e;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            color: #eee;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        /* Confidence indicator */
+        .confidence-ring {
+            pointer-events: none;
+        }
+
+        /* Legend */
+        #legend {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 10px 15px;
+            font-size: 11px;
+        }
+
+        #legend h4 {
+            margin: 0 0 8px;
+            color: #888;
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 4px 0;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .legend-ring {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: 2px solid;
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="sidebar">
+            <div class="sidebar-section">
+                <h1>Knowledge Graph <span>CITIOM v Gulfstream</span></h1>
+            </div>
+
+            <div class="sidebar-section">
+                <h2>Ask a Question</h2>
+                <div id="query-container">
+                    <textarea id="query-input" placeholder="Ask anything about the case..."></textarea>
+                    <button id="query-btn">
+                        <span>Query Graph</span>
+                    </button>
+                    <div class="sample-queries">
+                        <span class="sample-query" data-query="Who are the main parties in this case?">Main parties</span>
+                        <span class="sample-query" data-query="What is the dispute about?">About dispute</span>
+                        <span class="sample-query" data-query="What are the key dates?">Key dates</span>
+                        <span class="sample-query" data-query="Tell me about Gulfstream">About Gulfstream</span>
+                        <span class="sample-query" data-query="What obligations are mentioned?">Obligations</span>
+                    </div>
+                </div>
+                <div id="query-answer">
+                    <h3>Answer</h3>
+                    <div id="answer-text"></div>
+                    <div id="query-stats"></div>
+                </div>
+            </div>
+
+            <div class="sidebar-scroll">
+                <h2>Search Entities</h2>
+                <div id="search-container">
+                    <input type="text" id="search" placeholder="Search by name...">
+                    <div id="search-results"></div>
+                </div>
+
+                <h2>Statistics</h2>
+                <div id="stats">
+                    <div class="stat-row">
+                        <span class="stat-label">Visible Nodes</span>
+                        <span class="stat-value" id="stat-nodes">-</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Visible Links</span>
+                        <span class="stat-value" id="stat-links">-</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Documents</span>
+                        <span class="stat-value" id="stat-docs">-</span>
+                    </div>
+                </div>
+
+                <h2>Filter by Type</h2>
+                <div id="type-filters" class="filter-group"></div>
+
+                <div id="entity-details">
+                    <h3 id="entity-name"></h3>
+                    <span class="type-badge" id="entity-type"></span>
+                    <h2>Connections</h2>
+                    <div id="entity-connections"></div>
+                </div>
+
+                <div id="facts-panel">
+                    <h2>Related Facts</h2>
+                    <div id="facts-list"></div>
+                </div>
+
+                <div id="nl-edit-container">
+                    <h2>Natural Language Edit</h2>
+                    <input type="text" id="nl-edit-input" placeholder="e.g. rename CITIOM to Channel IT...">
+                    <button id="nl-edit-btn">Execute Command</button>
+                    <div class="nl-edit-examples">
+                        <span class="nl-edit-example" data-cmd="rename">rename X to Y</span>
+                        <span class="nl-edit-example" data-cmd="merge">merge X with Y</span>
+                        <span class="nl-edit-example" data-cmd="delete">delete X</span>
+                        <span class="nl-edit-example" data-cmd="link">link X to Y</span>
+                        <span class="nl-edit-example" data-cmd="create">create Person X</span>
+                    </div>
+                    <div id="nl-edit-result"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="graph-container">
+            <div id="loading">
+                <div class="spinner"></div>
+                <div>Loading knowledge graph...</div>
+            </div>
+            <svg id="graph"></svg>
+
+            <div id="view-toggle">
+                <button class="view-btn active" data-view="full">Full Graph</button>
+                <button class="view-btn" data-view="query">Query Results</button>
+            </div>
+
+            <div id="controls">
+                <button class="control-btn" id="btn-reset">Reset View</button>
+                <button class="control-btn" id="btn-center">Center</button>
+                <button class="control-btn" id="btn-facts">Show Facts</button>
+                <button class="control-btn" id="btn-edit">Edit Mode</button>
+                <button class="control-btn" id="btn-add-entity">+ Entity</button>
+            </div>
+
+            <div id="tooltip">
+                <h4 id="tooltip-name"></h4>
+                <div class="type" id="tooltip-type"></div>
+            </div>
+
+            <div id="layout-container">
+                <label>Layout</label>
+                <select id="layout-select">
+                    <option value="force">Force-Directed</option>
+                    <option value="cluster">Cluster by Type</option>
+                    <option value="radial">Radial</option>
+                    <option value="hierarchical">Hierarchical</option>
+                </select>
+            </div>
+
+            <div id="legend">
+                <h4>Confidence</h4>
+                <div class="legend-item">
+                    <div class="legend-ring" style="border-color: #34a853;"></div>
+                    <span>Confirmed</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-ring" style="border-color: #fbbc04;"></div>
+                    <span>Extracted</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-ring" style="border-color: #ea4335;"></div>
+                    <span>Inferred</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Edit Modal -->
+        <div id="edit-modal">
+            <div class="modal-box">
+                <h2 id="modal-title">Edit</h2>
+                <div id="modal-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE = '';  // Same origin
+
+        // State
+        let fullGraphData = null;
+        let queryGraphData = null;
+        let currentView = 'full';
+        let simulation = null;
+        let svg, g, link, node;
+        let activeFilters = new Set();
+        let showFacts = false;
+        let zoom;
+
+        // Type colors
+        const TYPE_COLORS = {
+            'Organization': '#4285f4',
+            'Person': '#ea4335',
+            'Document': '#fbbc04',
+            'Date': '#34a853',
+            'Money': '#ff6d01',
+            'Location': '#46bdc6',
+            'Reference': '#9c27b0',
+            'Fact': '#607d8b'
+        };
+
+        // Confidence ring colors
+        const CONFIDENCE_COLORS = {
+            'confirmed': '#34a853',  // Green
+            'extracted': '#fbbc04',  // Yellow
+            'inferred': '#ea4335'    // Red
+        };
+
+        // Current layout
+        let currentLayout = 'force';
+
+        // Initialize
+        async function init() {
+            try {
+                // Load full graph (exclude facts initially for faster load)
+                const response = await fetch(`${API_BASE}/api/graph?include_facts=false&limit=500`);
+                fullGraphData = await response.json();
+
+                // Update stats
+                document.getElementById('stat-docs').textContent = fullGraphData.stats.total_documents || '-';
+
+                // Create type filters
+                createTypeFilters();
+
+                // Initialize graph
+                initGraph();
+
+                // Setup interactions
+                setupSearch();
+                setupQuery();
+                setupControls();
+
+                // Hide loading
+                document.getElementById('loading').style.display = 'none';
+
+            } catch (error) {
+                console.error('Error loading graph:', error);
+                document.getElementById('loading').innerHTML = `
+                    <div style="color: #ea4335;">Error loading graph</div>
+                    <div style="margin-top: 10px; font-size: 12px;">${error.message}</div>
+                `;
+            }
+        }
+
+        function createTypeFilters() {
+            const container = document.getElementById('type-filters');
+            const typeCounts = fullGraphData.stats.full_entity_counts || {};
+
+            // Default: show all except Facts
+            Object.keys(typeCounts).forEach(type => {
+                if (type !== 'Fact') activeFilters.add(type);
+            });
+
+            const sortedTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
+
+            sortedTypes.forEach(([type, count]) => {
+                const color = TYPE_COLORS[type] || '#999';
+                const checked = activeFilters.has(type);
+
+                const div = document.createElement('div');
+                div.className = 'filter-item';
+                div.innerHTML = `
+                    <input type="checkbox" id="filter-${type}" ${checked ? 'checked' : ''}>
+                    <span class="dot" style="background: ${color}"></span>
+                    <label for="filter-${type}">${type}</label>
+                    <span class="count">${count.toLocaleString()}</span>
+                `;
+
+                div.querySelector('input').addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        activeFilters.add(type);
+                    } else {
+                        activeFilters.delete(type);
+                    }
+                    updateGraph();
+                });
+
+                container.appendChild(div);
+            });
+        }
+
+        function initGraph() {
+            const container = document.getElementById('graph-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            svg = d3.select('#graph')
+                .attr('width', width)
+                .attr('height', height);
+
+            // Zoom behavior
+            zoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => {
+                    g.attr('transform', event.transform);
+                });
+
+            svg.call(zoom);
+            g = svg.append('g');
+
+            // Arrow marker
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '-0 -5 10 10')
+                .attr('refX', 20)
+                .attr('refY', 0)
+                .attr('orient', 'auto')
+                .attr('markerWidth', 5)
+                .attr('markerHeight', 5)
+                .append('path')
+                .attr('d', 'M 0,-5 L 10,0 L 0,5')
+                .attr('fill', '#444');
+
+            // Simulation
+            simulation = d3.forceSimulation()
+                .force('link', d3.forceLink().id(d => d.id).distance(80))
+                .force('charge', d3.forceManyBody().strength(-200))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(25));
+
+            updateGraph();
+
+            // Resize
+            window.addEventListener('resize', () => {
+                const w = container.clientWidth;
+                const h = container.clientHeight;
+                svg.attr('width', w).attr('height', h);
+                simulation.force('center', d3.forceCenter(w / 2, h / 2));
+                simulation.alpha(0.3).restart();
+            });
+        }
+
+        function getCurrentData() {
+            return currentView === 'query' && queryGraphData ? queryGraphData : fullGraphData;
+        }
+
+        function updateGraph() {
+            const data = getCurrentData();
+            if (!data) return;
+
+            // Filter nodes
+            const filteredNodes = data.nodes.filter(n => activeFilters.has(n.type));
+            const nodeIds = new Set(filteredNodes.map(n => n.id));
+            const filteredLinks = data.links.filter(l => {
+                const sourceId = l.source.id ?? l.source;
+                const targetId = l.target.id ?? l.target;
+                return nodeIds.has(sourceId) && nodeIds.has(targetId);
+            });
+
+            // Update stats
+            document.getElementById('stat-nodes').textContent = filteredNodes.length.toLocaleString();
+            document.getElementById('stat-links').textContent = filteredLinks.length.toLocaleString();
+
+            // Links
+            link = g.selectAll('.link')
+                .data(filteredLinks, d => `${d.source.id ?? d.source}-${d.target.id ?? d.target}-${d.relation}`);
+
+            link.exit().remove();
+
+            const linkEnter = link.enter().append('line')
+                .attr('class', 'link')
+                .attr('stroke', '#333')
+                .attr('stroke-width', 1)
+                .attr('marker-end', 'url(#arrowhead)');
+
+            link = linkEnter.merge(link);
+
+            // Nodes
+            node = g.selectAll('.node')
+                .data(filteredNodes, d => d.entity_id || d.id);
+
+            node.exit().remove();
+
+            const nodeEnter = node.enter().append('g')
+                .attr('class', 'node')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
+
+            // Confidence ring (outer)
+            nodeEnter.append('circle')
+                .attr('class', 'confidence-ring')
+                .attr('r', d => {
+                    const conn = d.connections || 1;
+                    return Math.min(6 + Math.sqrt(conn) * 1.5, 20) + 3;
+                })
+                .attr('fill', 'none')
+                .attr('stroke', d => CONFIDENCE_COLORS[d.confidence] || CONFIDENCE_COLORS['extracted'])
+                .attr('stroke-width', 2)
+                .attr('stroke-dasharray', d => d.confidence === 'inferred' ? '3,2' : 'none')
+                .attr('opacity', 0.7);
+
+            // Main node circle
+            nodeEnter.append('circle')
+                .attr('class', 'main-circle')
+                .attr('r', d => {
+                    const conn = d.connections || 1;
+                    return Math.min(6 + Math.sqrt(conn) * 1.5, 20);
+                })
+                .attr('fill', d => d.color || TYPE_COLORS[d.type] || '#999')
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1);
+
+            nodeEnter.append('text')
+                .attr('dx', 15)
+                .attr('dy', 4)
+                .attr('fill', '#aaa')
+                .attr('font-size', '10px')
+                .text(d => d.name);
+
+            node = nodeEnter.merge(node);
+
+            // Interactions
+            node.on('mouseover', handleMouseOver)
+                .on('mouseout', handleMouseOut)
+                .on('click', handleClick)
+                .on('contextmenu', (event, d) => {
+                    event.preventDefault();
+                    showEditModal(d);
+                });
+
+            // Update simulation
+            simulation.nodes(filteredNodes);
+            simulation.force('link').links(filteredLinks);
+            simulation.alpha(1).restart();
+
+            simulation.on('tick', () => {
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+
+                node.attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+        }
+
+        function handleMouseOver(event, d) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.querySelector('#tooltip-name').textContent = d.full_name || d.name;
+            tooltip.querySelector('#tooltip-type').textContent = `${d.type}${d.connections ? ` - ${d.connections} connections` : ''}`;
+            tooltip.style.left = (event.pageX + 15) + 'px';
+            tooltip.style.top = (event.pageY - 10) + 'px';
+            tooltip.classList.add('active');
+
+            // Highlight
+            const data = getCurrentData();
+            const connectedIds = new Set();
+            data.links.forEach(l => {
+                const sourceId = l.source.id ?? l.source;
+                const targetId = l.target.id ?? l.target;
+                if (sourceId === d.id) connectedIds.add(targetId);
+                if (targetId === d.id) connectedIds.add(sourceId);
+            });
+
+            node.style('opacity', n => connectedIds.has(n.id) || n.id === d.id ? 1 : 0.15);
+            link.style('opacity', l => {
+                const sourceId = l.source.id ?? l.source;
+                const targetId = l.target.id ?? l.target;
+                return sourceId === d.id || targetId === d.id ? 1 : 0.05;
+            });
+        }
+
+        function handleMouseOut() {
+            document.getElementById('tooltip').classList.remove('active');
+            node.style('opacity', 1);
+            link.style('opacity', 1);
+        }
+
+        function handleClick(event, d) {
+            showEntityDetails(d);
+        }
+
+        function showEntityDetails(d) {
+            const details = document.getElementById('entity-details');
+            details.classList.add('active');
+
+            document.getElementById('entity-name').textContent = d.full_name || d.name;
+            const typeBadge = document.getElementById('entity-type');
+            typeBadge.textContent = d.type;
+            typeBadge.style.background = d.color || TYPE_COLORS[d.type] || '#999';
+
+            // Connections
+            const data = getCurrentData();
+            const connections = [];
+            data.links.forEach(l => {
+                const sourceId = l.source.id ?? l.source;
+                const targetId = l.target.id ?? l.target;
+
+                if (sourceId === d.id) {
+                    const target = data.nodes.find(n => n.id === targetId);
+                    if (target) connections.push({ relation: l.relation, entity: target, direction: 'out' });
+                }
+                if (targetId === d.id) {
+                    const source = data.nodes.find(n => n.id === sourceId);
+                    if (source) connections.push({ relation: l.relation, entity: source, direction: 'in' });
+                }
+            });
+
+            const container = document.getElementById('entity-connections');
+            container.innerHTML = connections.slice(0, 15).map(c => `
+                <div class="connection-item">
+                    <span style="color: ${c.entity.color || TYPE_COLORS[c.entity.type] || '#999'}">${c.entity.name}</span>
+                    <div class="relation">${c.direction === 'out' ? '→' : '←'} ${c.relation}</div>
+                </div>
+            `).join('');
+
+            if (connections.length > 15) {
+                container.innerHTML += `<div class="connection-item" style="color: #666;">... and ${connections.length - 15} more</div>`;
+            }
+
+            // Add action buttons
+            const actionsDiv = document.createElement('div');
+            actionsDiv.style.cssText = 'margin-top: 15px; display: flex; gap: 8px;';
+            actionsDiv.innerHTML = `
+                <button class="btn btn-secondary" style="flex:1; padding: 8px; font-size: 12px;" onclick="showEditModal(window._selectedEntity)">Edit</button>
+                <button class="btn btn-secondary" style="flex:1; padding: 8px; font-size: 12px;" onclick="showCreateEdgeModal(window._selectedEntity)">+ Link</button>
+            `;
+            details.appendChild(actionsDiv);
+
+            // Store for button handlers
+            window._selectedEntity = d;
+        }
+
+        function setupSearch() {
+            const input = document.getElementById('search');
+            const results = document.getElementById('search-results');
+
+            input.addEventListener('input', async (e) => {
+                const query = e.target.value;
+                if (query.length < 2) {
+                    results.style.display = 'none';
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}`);
+                    const matches = await response.json();
+
+                    if (matches.length === 0) {
+                        results.style.display = 'none';
+                        return;
+                    }
+
+                    results.innerHTML = matches.map(m => `
+                        <div class="search-item" data-id="${m.id}">
+                            <span class="dot" style="background: ${m.color}"></span>
+                            <span>${m.name}</span>
+                        </div>
+                    `).join('');
+
+                    results.style.display = 'block';
+
+                    results.querySelectorAll('.search-item').forEach(item => {
+                        item.addEventListener('click', async () => {
+                            // Load entity neighborhood
+                            const entityId = item.dataset.id;
+                            try {
+                                const resp = await fetch(`${API_BASE}/api/entity/${entityId}?depth=2&max_nodes=50`);
+                                const neighborhood = await resp.json();
+
+                                queryGraphData = neighborhood;
+                                currentView = 'query';
+                                document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+                                document.querySelector('[data-view="query"]').classList.add('active');
+
+                                // Enable all types for query view
+                                Object.keys(TYPE_COLORS).forEach(t => activeFilters.add(t));
+                                updateGraph();
+                                centerGraph();
+                            } catch (err) {
+                                console.error(err);
+                            }
+
+                            results.style.display = 'none';
+                            input.value = '';
+                        });
+                    });
+                } catch (err) {
+                    console.error(err);
+                }
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!input.contains(e.target) && !results.contains(e.target)) {
+                    results.style.display = 'none';
+                }
+            });
+        }
+
+        function setupQuery() {
+            const input = document.getElementById('query-input');
+            const btn = document.getElementById('query-btn');
+            const answerBox = document.getElementById('query-answer');
+            const answerText = document.getElementById('answer-text');
+            const queryStats = document.getElementById('query-stats');
+            const factsPanel = document.getElementById('facts-panel');
+            const factsList = document.getElementById('facts-list');
+
+            // Sample queries
+            document.querySelectorAll('.sample-query').forEach(sq => {
+                sq.addEventListener('click', () => {
+                    input.value = sq.dataset.query;
+                    btn.click();
+                });
+            });
+
+            btn.addEventListener('click', async () => {
+                const query = input.value.trim();
+                if (!query) return;
+
+                btn.disabled = true;
+                btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;border-width:2px;margin:0"></div> Querying...';
+
+                try {
+                    const response = await fetch(`${API_BASE}/api/query`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query })
+                    });
+
+                    const result = await response.json();
+
+                    if (result.error) {
+                        throw new Error(result.error);
+                    }
+
+                    // Show answer
+                    answerText.innerHTML = result.answer.replace(/\n/g, '<br>');
+                    queryStats.textContent = `Found ${result.stats.entities_found} entities, ${result.stats.edges_found} relations, ${result.stats.facts_found} facts`;
+                    answerBox.classList.add('active');
+
+                    // Show facts
+                    if (result.facts && result.facts.length > 0) {
+                        factsList.innerHTML = result.facts.slice(0, 10).map(f => `
+                            <div class="fact-item">${f.content}</div>
+                        `).join('');
+                        factsPanel.classList.add('active');
+                    } else {
+                        factsPanel.classList.remove('active');
+                    }
+
+                    // Update graph with query results
+                    if (result.subgraph && result.subgraph.nodes.length > 0) {
+                        queryGraphData = result.subgraph;
+                        currentView = 'query';
+                        document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+                        document.querySelector('[data-view="query"]').classList.add('active');
+
+                        // Enable all types
+                        Object.keys(TYPE_COLORS).forEach(t => activeFilters.add(t));
+                        updateGraph();
+                        setTimeout(centerGraph, 500);
+                    }
+
+                } catch (error) {
+                    answerText.textContent = `Error: ${error.message}`;
+                    answerBox.classList.add('active');
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = '<span>Query Graph</span>';
+                }
+            });
+
+            // Enter key
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    btn.click();
+                }
+            });
+        }
+
+        function setupControls() {
+            // View toggle
+            document.querySelectorAll('.view-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentView = btn.dataset.view;
+                    updateGraph();
+                });
+            });
+
+            // Reset
+            document.getElementById('btn-reset').addEventListener('click', () => {
+                svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+            });
+
+            // Center
+            document.getElementById('btn-center').addEventListener('click', centerGraph);
+
+            // Facts toggle
+            const factsBtn = document.getElementById('btn-facts');
+            factsBtn.addEventListener('click', () => {
+                showFacts = !showFacts;
+                factsBtn.classList.toggle('active', showFacts);
+
+                if (showFacts) {
+                    activeFilters.add('Fact');
+                } else {
+                    activeFilters.delete('Fact');
+                }
+
+                // Update checkbox
+                const checkbox = document.getElementById('filter-Fact');
+                if (checkbox) checkbox.checked = showFacts;
+
+                updateGraph();
+            });
+
+            // Edit mode toggle
+            const editBtn = document.getElementById('btn-edit');
+            editBtn.addEventListener('click', () => {
+                editMode = !editMode;
+                editBtn.classList.toggle('edit-mode', editMode);
+                editBtn.textContent = editMode ? 'Exit Edit' : 'Edit Mode';
+            });
+
+            // Add entity button
+            document.getElementById('btn-add-entity').addEventListener('click', showCreateEntityModal);
+
+            // Close modal on outside click
+            document.getElementById('edit-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'edit-modal') {
+                    closeModal();
+                }
+            });
+
+            // Escape key to close modal
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    closeModal();
+                }
+            });
+
+            // Layout selector
+            document.getElementById('layout-select').addEventListener('change', (e) => {
+                currentLayout = e.target.value;
+                applyLayout();
+            });
+
+            // NL Edit functionality
+            setupNLEdit();
+        }
+
+        // ========== NL EDIT FUNCTIONALITY ==========
+        function setupNLEdit() {
+            const input = document.getElementById('nl-edit-input');
+            const btn = document.getElementById('nl-edit-btn');
+            const resultDiv = document.getElementById('nl-edit-result');
+
+            // Example click handlers
+            document.querySelectorAll('.nl-edit-example').forEach(ex => {
+                ex.addEventListener('click', () => {
+                    const cmd = ex.dataset.cmd;
+                    const templates = {
+                        'rename': 'rename [entity name] to [new name]',
+                        'merge': 'merge [entity1] with [entity2]',
+                        'delete': 'delete [entity name]',
+                        'link': 'link [entity1] to [entity2] with [relationship]',
+                        'create': 'create [type] named [name]'
+                    };
+                    input.value = templates[cmd] || '';
+                    input.focus();
+                    input.select();
+                });
+            });
+
+            btn.addEventListener('click', async () => {
+                const command = input.value.trim();
+                if (!command) return;
+
+                btn.disabled = true;
+                btn.textContent = 'Processing...';
+                resultDiv.className = '';
+                resultDiv.style.display = 'none';
+
+                try {
+                    const response = await fetch(`${API_BASE}/api/nl-edit`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ command })
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        resultDiv.textContent = result.message;
+                        resultDiv.className = 'success';
+                        input.value = '';
+
+                        // Reload graph after 1 second
+                        setTimeout(() => {
+                            location.reload();
+                        }, 1500);
+                    } else {
+                        resultDiv.textContent = result.error || 'Command failed';
+                        resultDiv.className = 'error';
+                    }
+                } catch (err) {
+                    resultDiv.textContent = 'Error: ' + err.message;
+                    resultDiv.className = 'error';
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Execute Command';
+                }
+            });
+
+            // Enter key
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    btn.click();
+                }
+            });
+        }
+
+        // ========== LAYOUT FUNCTIONS ==========
+        function applyLayout() {
+            const data = getCurrentData();
+            if (!data) return;
+
+            const container = document.getElementById('graph-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            const centerX = width / 2;
+            const centerY = height / 2;
+
+            // Get filtered nodes
+            const filteredNodes = data.nodes.filter(n => activeFilters.has(n.type));
+
+            switch (currentLayout) {
+                case 'cluster':
+                    applyClusterLayout(filteredNodes, centerX, centerY);
+                    break;
+                case 'radial':
+                    applyRadialLayout(filteredNodes, centerX, centerY);
+                    break;
+                case 'hierarchical':
+                    applyHierarchicalLayout(filteredNodes, centerX, centerY, width, height);
+                    break;
+                case 'force':
+                default:
+                    // Reset to force simulation
+                    filteredNodes.forEach(n => {
+                        n.fx = null;
+                        n.fy = null;
+                    });
+                    simulation.alpha(1).restart();
+                    break;
+            }
+        }
+
+        function applyClusterLayout(nodes, centerX, centerY) {
+            // Group by type
+            const typeGroups = {};
+            nodes.forEach(n => {
+                if (!typeGroups[n.type]) typeGroups[n.type] = [];
+                typeGroups[n.type].push(n);
+            });
+
+            const types = Object.keys(typeGroups);
+            const angleStep = (2 * Math.PI) / types.length;
+            const clusterRadius = Math.min(centerX, centerY) * 0.6;
+
+            types.forEach((type, i) => {
+                const angle = i * angleStep - Math.PI / 2;
+                const clusterCenterX = centerX + Math.cos(angle) * clusterRadius;
+                const clusterCenterY = centerY + Math.sin(angle) * clusterRadius;
+
+                const groupNodes = typeGroups[type];
+                const nodeRadius = Math.min(150, 20 * Math.sqrt(groupNodes.length));
+
+                groupNodes.forEach((n, j) => {
+                    const nodeAngle = (j / groupNodes.length) * 2 * Math.PI;
+                    const r = nodeRadius * (0.3 + 0.7 * Math.random());
+                    n.fx = clusterCenterX + Math.cos(nodeAngle) * r;
+                    n.fy = clusterCenterY + Math.sin(nodeAngle) * r;
+                });
+            });
+
+            simulation.alpha(0.3).restart();
+            setTimeout(() => centerGraph(), 100);
+        }
+
+        function applyRadialLayout(nodes, centerX, centerY) {
+            // Sort by connections (most connected in center)
+            const sorted = [...nodes].sort((a, b) => (b.connections || 0) - (a.connections || 0));
+
+            const rings = 5;
+            const nodesPerRing = Math.ceil(sorted.length / rings);
+
+            sorted.forEach((n, i) => {
+                const ring = Math.floor(i / nodesPerRing);
+                const posInRing = i % nodesPerRing;
+                const ringSize = Math.min(nodesPerRing, sorted.length - ring * nodesPerRing);
+
+                const radius = 50 + ring * 80;
+                const angle = (posInRing / ringSize) * 2 * Math.PI - Math.PI / 2;
+
+                n.fx = centerX + Math.cos(angle) * radius;
+                n.fy = centerY + Math.sin(angle) * radius;
+            });
+
+            simulation.alpha(0.3).restart();
+            setTimeout(() => centerGraph(), 100);
+        }
+
+        function applyHierarchicalLayout(nodes, centerX, centerY, width, height) {
+            // Group by type with hierarchy: Organization > Person > Document > others
+            const typeOrder = ['Organization', 'Person', 'Document', 'Date', 'Money', 'Location', 'Reference', 'Fact'];
+            const typeGroups = {};
+
+            nodes.forEach(n => {
+                if (!typeGroups[n.type]) typeGroups[n.type] = [];
+                typeGroups[n.type].push(n);
+            });
+
+            const sortedTypes = typeOrder.filter(t => typeGroups[t] && typeGroups[t].length > 0);
+            const levelHeight = height / (sortedTypes.length + 1);
+
+            sortedTypes.forEach((type, level) => {
+                const groupNodes = typeGroups[type];
+                const y = (level + 1) * levelHeight;
+                const spacing = width / (groupNodes.length + 1);
+
+                groupNodes.forEach((n, i) => {
+                    n.fx = (i + 1) * spacing;
+                    n.fy = y + (Math.random() - 0.5) * 30;  // Small jitter
+                });
+            });
+
+            simulation.alpha(0.3).restart();
+            setTimeout(() => centerGraph(), 100);
+        }
+
+        function centerGraph() {
+            const bounds = g.node().getBBox();
+            if (bounds.width === 0) return;
+
+            const container = document.getElementById('graph-container');
+            const fullWidth = container.clientWidth;
+            const fullHeight = container.clientHeight;
+            const midX = bounds.x + bounds.width / 2;
+            const midY = bounds.y + bounds.height / 2;
+            const scale = 0.8 / Math.max(bounds.width / fullWidth, bounds.height / fullHeight);
+            const translate = [fullWidth / 2 - scale * midX, fullHeight / 2 - scale * midY];
+
+            svg.transition().duration(750).call(
+                zoom.transform,
+                d3.zoomIdentity.translate(translate[0], translate[1]).scale(Math.min(scale, 1.5))
+            );
+        }
+
+        function dragstarted(event) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            event.subject.fx = event.subject.x;
+            event.subject.fy = event.subject.y;
+        }
+
+        function dragged(event) {
+            event.subject.fx = event.x;
+            event.subject.fy = event.y;
+        }
+
+        function dragended(event) {
+            if (!event.active) simulation.alphaTarget(0);
+            event.subject.fx = null;
+            event.subject.fy = null;
+        }
+
+        // ========== EDIT FUNCTIONALITY ==========
+
+        let entityTypes = [];
+        let relationTypes = [];
+        let selectedForMerge = null;
+
+        // Load types on init
+        async function loadTypes() {
+            try {
+                const [etRes, rtRes] = await Promise.all([
+                    fetch(`${API_BASE}/api/entity-types`),
+                    fetch(`${API_BASE}/api/relation-types`)
+                ]);
+                entityTypes = await etRes.json();
+                relationTypes = await rtRes.json();
+            } catch (e) {
+                console.error('Failed to load types:', e);
+            }
+        }
+        loadTypes();
+
+        // Show edit modal for entity
+        function showEditModal(entity) {
+            const modal = document.getElementById('edit-modal');
+            const title = document.getElementById('modal-title');
+            const content = document.getElementById('modal-content');
+
+            title.textContent = 'Edit Entity';
+            content.innerHTML = `
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="edit-name" value="${entity.full_name || entity.name}">
+                </div>
+                <div class="form-group">
+                    <label>Type</label>
+                    <select id="edit-type">
+                        ${entityTypes.map(t => `<option value="${t}" ${t === entity.type ? 'selected' : ''}>${t}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Confidence</label>
+                    <select id="edit-confidence">
+                        <option value="confirmed" ${entity.confidence === 'confirmed' ? 'selected' : ''}>Confirmed</option>
+                        <option value="extracted" ${entity.confidence === 'extracted' ? 'selected' : ''}>Extracted</option>
+                        <option value="inferred" ${entity.confidence === 'inferred' ? 'selected' : ''}>Inferred</option>
+                    </select>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-danger" onclick="deleteEntity('${entity.entity_id}')">Delete</button>
+                    <button class="btn btn-secondary" onclick="startMerge('${entity.entity_id}', '${entity.full_name || entity.name}')">Merge With...</button>
+                    <button class="btn btn-primary" onclick="saveEntity('${entity.entity_id}')">Save</button>
+                </div>
+            `;
+
+            modal.classList.add('active');
+        }
+
+        // Show create entity modal
+        function showCreateEntityModal() {
+            const modal = document.getElementById('edit-modal');
+            const title = document.getElementById('modal-title');
+            const content = document.getElementById('modal-content');
+
+            title.textContent = 'Create Entity';
+            content.innerHTML = `
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="edit-name" placeholder="Entity name">
+                </div>
+                <div class="form-group">
+                    <label>Type</label>
+                    <select id="edit-type">
+                        ${entityTypes.map(t => `<option value="${t}">${t}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="createEntity()">Create</button>
+                </div>
+            `;
+
+            modal.classList.add('active');
+        }
+
+        // Show create edge modal
+        function showCreateEdgeModal(sourceEntity) {
+            const modal = document.getElementById('edit-modal');
+            const title = document.getElementById('modal-title');
+            const content = document.getElementById('modal-content');
+
+            title.textContent = 'Create Relationship';
+            content.innerHTML = `
+                <div class="form-group">
+                    <label>From</label>
+                    <input type="text" value="${sourceEntity.full_name || sourceEntity.name}" disabled>
+                    <input type="hidden" id="edge-source" value="${sourceEntity.entity_id}">
+                </div>
+                <div class="form-group">
+                    <label>Relationship</label>
+                    <select id="edge-relation">
+                        ${relationTypes.map(t => `<option value="${t}">${t}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>To (search)</label>
+                    <input type="text" id="edge-target-search" placeholder="Search for target entity...">
+                    <div id="edge-target-results"></div>
+                    <input type="hidden" id="edge-target">
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="createEdge()">Create</button>
+                </div>
+            `;
+
+            modal.classList.add('active');
+
+            // Setup target search
+            const searchInput = document.getElementById('edge-target-search');
+            const resultsDiv = document.getElementById('edge-target-results');
+
+            searchInput.addEventListener('input', async (e) => {
+                const q = e.target.value;
+                if (q.length < 2) {
+                    resultsDiv.innerHTML = '';
+                    return;
+                }
+
+                const resp = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`);
+                const results = await resp.json();
+
+                resultsDiv.innerHTML = results.slice(0, 5).map(r => `
+                    <div class="search-result-item" onclick="selectEdgeTarget('${r.id}', '${r.name.replace(/'/g, "\\'")}')">
+                        <span class="dot" style="background: ${r.color}"></span>
+                        ${r.name}
+                    </div>
+                `).join('');
+            });
+        }
+
+        function selectEdgeTarget(id, name) {
+            document.getElementById('edge-target').value = id;
+            document.getElementById('edge-target-search').value = name;
+            document.getElementById('edge-target-results').innerHTML = '';
+        }
+
+        async function saveEntity(entityId) {
+            const name = document.getElementById('edit-name').value;
+            const type = document.getElementById('edit-type').value;
+            const confidence = document.getElementById('edit-confidence').value;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/entity/${entityId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ canonical_name: name, type, confidence })
+                });
+
+                const result = await resp.json();
+                if (result.success) {
+                    closeModal();
+                    location.reload(); // Refresh to see changes
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function deleteEntity(entityId) {
+            if (!confirm('Delete this entity and all its relationships?')) return;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/entity/${entityId}`, { method: 'DELETE' });
+                const result = await resp.json();
+
+                if (result.success) {
+                    closeModal();
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function createEntity() {
+            const name = document.getElementById('edit-name').value;
+            const type = document.getElementById('edit-type').value;
+
+            if (!name) {
+                alert('Name is required');
+                return;
+            }
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/entity`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ canonical_name: name, type })
+                });
+
+                const result = await resp.json();
+                if (result.success) {
+                    closeModal();
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function createEdge() {
+            const source = document.getElementById('edge-source').value;
+            const target = document.getElementById('edge-target').value;
+            const relation = document.getElementById('edge-relation').value;
+
+            if (!target) {
+                alert('Please select a target entity');
+                return;
+            }
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/edge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_entity_id: source,
+                        target_entity_id: target,
+                        relation_type: relation
+                    })
+                });
+
+                const result = await resp.json();
+                if (result.success) {
+                    closeModal();
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        function startMerge(entityId, entityName) {
+            selectedForMerge = { id: entityId, name: entityName };
+            closeModal();
+
+            const modal = document.getElementById('edit-modal');
+            const title = document.getElementById('modal-title');
+            const content = document.getElementById('modal-content');
+
+            title.textContent = 'Merge Entities';
+            content.innerHTML = `
+                <p>Merging: <strong>${entityName}</strong></p>
+                <div class="form-group">
+                    <label>Merge into (search)</label>
+                    <input type="text" id="merge-target-search" placeholder="Search for entity to keep...">
+                    <div id="merge-target-results"></div>
+                    <input type="hidden" id="merge-target">
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="executeMerge()">Merge</button>
+                </div>
+            `;
+
+            modal.classList.add('active');
+
+            // Setup search
+            const searchInput = document.getElementById('merge-target-search');
+            const resultsDiv = document.getElementById('merge-target-results');
+
+            searchInput.addEventListener('input', async (e) => {
+                const q = e.target.value;
+                if (q.length < 2) {
+                    resultsDiv.innerHTML = '';
+                    return;
+                }
+
+                const resp = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`);
+                const results = await resp.json();
+
+                resultsDiv.innerHTML = results.filter(r => r.id !== selectedForMerge.id).slice(0, 5).map(r => `
+                    <div class="search-result-item" onclick="selectMergeTarget('${r.id}', '${r.name.replace(/'/g, "\\'")}')">
+                        <span class="dot" style="background: ${r.color}"></span>
+                        ${r.name}
+                    </div>
+                `).join('');
+            });
+        }
+
+        function selectMergeTarget(id, name) {
+            document.getElementById('merge-target').value = id;
+            document.getElementById('merge-target-search').value = name;
+            document.getElementById('merge-target-results').innerHTML = '';
+        }
+
+        async function executeMerge() {
+            const keepId = document.getElementById('merge-target').value;
+
+            if (!keepId) {
+                alert('Please select an entity to merge into');
+                return;
+            }
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/merge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        keep_id: keepId,
+                        merge_id: selectedForMerge.id
+                    })
+                });
+
+                const result = await resp.json();
+                if (result.success) {
+                    closeModal();
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('edit-modal').classList.remove('active');
+        }
+
+        // Update click handler to support edit mode
+        let editMode = false;
+
+        function handleClick(event, d) {
+            if (editMode) {
+                showEditModal(d);
+            } else {
+                showEntityDetails(d);
+            }
+        }
+
+        // Start
+        init();
+    </script>
+</body>
+</html>
