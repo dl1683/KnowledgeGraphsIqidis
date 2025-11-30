@@ -151,6 +151,50 @@ class EntityNormalizer:
 
         return normalized.strip()
 
+    # Entity type indicators for validation
+    ORG_TYPE_INDICATORS = [
+        'corporation', 'corp.', 'corp', 'incorporated', 'inc.', 'inc',
+        'limited', 'ltd.', 'ltd', 'llc', 'l.l.c.', 'llp', 'l.l.p.',
+        'company', 'co.', 'holdings', 'group', 'partners', 'associates',
+        'enterprises', 'industries', 'international', 'solutions',
+        'services', 'systems', 'technologies', 'aerospace', 'aviation',
+        'foundation', 'institute', 'association', 'plc', 'gmbh', 'ag',
+    ]
+
+    @staticmethod
+    def validate_entity_type(name: str, claimed_type: str) -> str:
+        """
+        Validate and potentially correct the entity type based on name patterns.
+
+        Returns the corrected type if the claimed type appears incorrect.
+        """
+        name_lower = name.lower()
+
+        # Check if the name clearly indicates an Organization
+        for indicator in EntityNormalizer.ORG_TYPE_INDICATORS:
+            if indicator in name_lower:
+                # Name contains organization indicator but was classified as Person
+                if claimed_type == 'Person':
+                    return 'Organization'
+                return claimed_type
+
+        # Check for person name patterns (Mr., Dr., etc.)
+        for prefix in EntityNormalizer.PERSON_PREFIXES:
+            if name_lower.startswith(prefix.lower()):
+                if claimed_type == 'Organization':
+                    return 'Person'
+                return claimed_type
+
+        # Check for ALL CAPS names that might be organizations
+        if name.isupper() and len(name) > 3:
+            words = name.split()
+            # Multiple uppercase words often indicate organization
+            if len(words) > 1 and any(ind in name_lower for ind in ['aerospace', 'corp', 'inc', 'ltd']):
+                if claimed_type == 'Person':
+                    return 'Organization'
+
+        return claimed_type
+
     @staticmethod
     def normalize_name(name: str, entity_type: str = None) -> str:
         """Normalize entity name based on type."""
@@ -579,6 +623,11 @@ class ExtractionPipeline:
         for entity in entities:
             if not entity.name or len(entity.name) < 2:
                 continue
+
+            # Validate and potentially correct entity type based on name patterns
+            validated_type = EntityNormalizer.validate_entity_type(entity.name, entity.type)
+            if validated_type != entity.type:
+                entity.type = validated_type
 
             # Normalize the entity name
             normalized_name = EntityNormalizer.normalize_name(entity.name, entity.type)
