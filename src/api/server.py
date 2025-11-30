@@ -1027,6 +1027,301 @@ def api_export():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Graph Analytics ====================
+
+def _compute_pagerank(adj: Dict[str, set], damping: float = 0.85, iterations: int = 100) -> Dict[str, float]:
+    """Compute PageRank for all nodes."""
+    nodes = list(adj.keys())
+    n = len(nodes)
+    if n == 0:
+        return {}
+
+    # Initialize PageRank
+    pr = {node: 1.0 / n for node in nodes}
+
+    for _ in range(iterations):
+        new_pr = {}
+        for node in nodes:
+            rank = (1 - damping) / n
+            for other in nodes:
+                if node in adj.get(other, set()):
+                    out_degree = len(adj.get(other, set()))
+                    if out_degree > 0:
+                        rank += damping * pr[other] / out_degree
+            new_pr[node] = rank
+        pr = new_pr
+
+    return pr
+
+
+def _compute_betweenness(adj: Dict[str, set], entity_ids: set, sample_size: int = 100) -> Dict[str, float]:
+    """Compute betweenness centrality using sampling for large graphs."""
+    from collections import deque
+
+    nodes = list(entity_ids)
+    n = len(nodes)
+    if n == 0:
+        return {}
+
+    betweenness = {node: 0.0 for node in nodes}
+
+    # Sample nodes for large graphs
+    sample_nodes = nodes[:sample_size] if n > sample_size else nodes
+
+    for source in sample_nodes:
+        # BFS from source
+        dist = {source: 0}
+        paths = {source: 1}
+        pred = {node: [] for node in nodes}
+        queue = deque([source])
+        visited_order = []
+
+        while queue:
+            v = queue.popleft()
+            visited_order.append(v)
+            for w in adj.get(v, set()):
+                if w not in dist:
+                    dist[w] = dist[v] + 1
+                    queue.append(w)
+                if dist.get(w) == dist[v] + 1:
+                    paths[w] = paths.get(w, 0) + paths[v]
+                    pred[w].append(v)
+
+        # Accumulate betweenness
+        delta = {node: 0.0 for node in nodes}
+        for w in reversed(visited_order):
+            for v in pred[w]:
+                if paths.get(w, 0) > 0:
+                    delta[v] += (paths.get(v, 0) / paths[w]) * (1 + delta[w])
+            if w != source:
+                betweenness[w] += delta[w]
+
+    # Normalize
+    if n > 2:
+        norm = 2.0 / ((n - 1) * (n - 2))
+        betweenness = {k: v * norm for k, v in betweenness.items()}
+
+    return betweenness
+
+
+@api.route('/analytics')
+def api_analytics():
+    """Compute graph analytics: degree centrality, PageRank, betweenness."""
+    limit = int(request.args.get('limit', 50))
+    metric = request.args.get('metric', 'all')  # degree, pagerank, betweenness, all
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get entities
+        cursor.execute('SELECT id, canonical_name, type FROM entities')
+        entities = {row['id']: dict(row) for row in cursor.fetchall()}
+
+        # Get edges
+        cursor.execute('SELECT source_entity_id, target_entity_id FROM edges')
+        edges = [dict(row) for row in cursor.fetchall()]
+
+        # Build adjacency
+        adj: Dict[str, set] = {}
+        in_degree: Dict[str, int] = {eid: 0 for eid in entities}
+        out_degree: Dict[str, int] = {eid: 0 for eid in entities}
+
+        for edge in edges:
+            src = edge['source_entity_id']
+            tgt = edge['target_entity_id']
+            if src not in adj:
+                adj[src] = set()
+            adj[src].add(tgt)
+            out_degree[src] = out_degree.get(src, 0) + 1
+            in_degree[tgt] = in_degree.get(tgt, 0) + 1
+
+        results = {}
+
+        # Degree centrality (normalized)
+        if metric in ['degree', 'all']:
+            n = len(entities)
+            degree_centrality = {}
+            for eid in entities:
+                total_degree = in_degree.get(eid, 0) + out_degree.get(eid, 0)
+                degree_centrality[eid] = total_degree / (2 * (n - 1)) if n > 1 else 0
+
+            sorted_degree = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)
+            results['degree_centrality'] = [
+                {
+                    'entity_id': eid,
+                    'name': entities[eid]['canonical_name'],
+                    'type': entities[eid]['type'],
+                    'score': round(score, 4),
+                    'in_degree': in_degree.get(eid, 0),
+                    'out_degree': out_degree.get(eid, 0)
+                }
+                for eid, score in sorted_degree[:limit]
+            ]
+
+        # PageRank
+        if metric in ['pagerank', 'all']:
+            # Build undirected adjacency for PageRank
+            undirected_adj: Dict[str, set] = {}
+            for edge in edges:
+                src, tgt = edge['source_entity_id'], edge['target_entity_id']
+                if src not in undirected_adj:
+                    undirected_adj[src] = set()
+                if tgt not in undirected_adj:
+                    undirected_adj[tgt] = set()
+                undirected_adj[src].add(tgt)
+                undirected_adj[tgt].add(src)
+
+            pagerank = _compute_pagerank(undirected_adj)
+            sorted_pr = sorted(pagerank.items(), key=lambda x: x[1], reverse=True)
+            results['pagerank'] = [
+                {
+                    'entity_id': eid,
+                    'name': entities[eid]['canonical_name'],
+                    'type': entities[eid]['type'],
+                    'score': round(score, 6)
+                }
+                for eid, score in sorted_pr[:limit] if eid in entities
+            ]
+
+        # Betweenness centrality
+        if metric in ['betweenness', 'all']:
+            # Build undirected adjacency
+            undirected_adj: Dict[str, set] = {}
+            for edge in edges:
+                src, tgt = edge['source_entity_id'], edge['target_entity_id']
+                if src not in undirected_adj:
+                    undirected_adj[src] = set()
+                if tgt not in undirected_adj:
+                    undirected_adj[tgt] = set()
+                undirected_adj[src].add(tgt)
+                undirected_adj[tgt].add(src)
+
+            betweenness = _compute_betweenness(undirected_adj, set(entities.keys()))
+            sorted_bc = sorted(betweenness.items(), key=lambda x: x[1], reverse=True)
+            results['betweenness'] = [
+                {
+                    'entity_id': eid,
+                    'name': entities[eid]['canonical_name'],
+                    'type': entities[eid]['type'],
+                    'score': round(score, 6)
+                }
+                for eid, score in sorted_bc[:limit] if eid in entities
+            ]
+
+        return jsonify({
+            'total_entities': len(entities),
+            'total_edges': len(edges),
+            'analytics': results
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== Shortest Path ====================
+
+@api.route('/shortest-path')
+def api_shortest_path():
+    """Find shortest path between two entities."""
+    source_id = request.args.get('source')
+    target_id = request.args.get('target')
+
+    if not source_id or not target_id:
+        return jsonify({'error': 'source and target parameters required'}), 400
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get entities
+        cursor.execute('SELECT id, canonical_name, type FROM entities')
+        entities = {row['id']: dict(row) for row in cursor.fetchall()}
+
+        if source_id not in entities:
+            return jsonify({'error': f'Source entity {source_id} not found'}), 404
+        if target_id not in entities:
+            return jsonify({'error': f'Target entity {target_id} not found'}), 404
+
+        # Get edges with relation info
+        cursor.execute('''
+            SELECT id, source_entity_id, target_entity_id, relation_type
+            FROM edges
+        ''')
+        edges = [dict(row) for row in cursor.fetchall()]
+
+        # Build undirected adjacency with edge info
+        adj: Dict[str, List[Tuple[str, str, str]]] = {}  # node -> [(neighbor, edge_id, relation)]
+        for edge in edges:
+            src, tgt = edge['source_entity_id'], edge['target_entity_id']
+            if src not in adj:
+                adj[src] = []
+            if tgt not in adj:
+                adj[tgt] = []
+            adj[src].append((tgt, edge['id'], edge['relation_type']))
+            adj[tgt].append((src, edge['id'], edge['relation_type']))
+
+        # BFS to find shortest path
+        from collections import deque
+
+        visited = {source_id: None}
+        edge_used = {source_id: None}
+        queue = deque([source_id])
+
+        while queue:
+            current = queue.popleft()
+            if current == target_id:
+                break
+
+            for neighbor, edge_id, relation in adj.get(current, []):
+                if neighbor not in visited:
+                    visited[neighbor] = current
+                    edge_used[neighbor] = (edge_id, relation)
+                    queue.append(neighbor)
+
+        if target_id not in visited:
+            return jsonify({
+                'found': False,
+                'message': 'No path exists between these entities'
+            })
+
+        # Reconstruct path
+        path_nodes = []
+        path_edges = []
+        current = target_id
+
+        while current is not None:
+            path_nodes.append({
+                'id': current,
+                'name': entities[current]['canonical_name'],
+                'type': entities[current]['type']
+            })
+            if edge_used[current] is not None:
+                edge_id, relation = edge_used[current]
+                path_edges.append({
+                    'id': edge_id,
+                    'relation': relation
+                })
+            current = visited[current]
+
+        path_nodes.reverse()
+        path_edges.reverse()
+
+        return jsonify({
+            'found': True,
+            'path_length': len(path_nodes) - 1,
+            'nodes': path_nodes,
+            'edges': path_edges
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== Entity Clusters ====================
 
 def _build_adjacency(edges: List[Dict]) -> Dict[str, set]:

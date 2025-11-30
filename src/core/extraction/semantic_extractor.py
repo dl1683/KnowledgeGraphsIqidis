@@ -67,19 +67,64 @@ class SemanticExtractor:
 
     # Unified extraction prompt - extracts everything in one API call
     # Note: {{ and }} are escaped braces for Python's str.format()
-    UNIFIED_EXTRACTION_PROMPT = """Extract entities, relationships, and facts from this legal text. Be CONCISE - only include the most important items.
+    UNIFIED_EXTRACTION_PROMPT = """Extract ALL entities, relationships, and facts from this legal text. Be THOROUGH - capture every meaningful item.
 
 OUTPUT FORMAT (JSON only, no markdown):
 {{"entities":[...],"relations":[...],"facts":[...]}}
 
-ENTITIES (max 50): name, type (Person/Organization/Location/Money/Date/Reference), properties, span_text
-RELATIONS (max 50): source_name, target_name, relation_type (represents/party_to/signed/employed_by/affiliated_with/testified/references/binds/related_to), properties
-FACTS (max 50): fact_type (obligation/admission/deadline/key_term/allegation/finding/quote), text (brief), related_entities, properties
+ENTITY EXTRACTION (no limit - extract ALL):
+- name: canonical form (full name, not abbreviations)
+- type: Person/Organization/Location/Money/Date/Document/Clause/Reference
+- properties: {{role, title, amount, currency, context, aliases}}
+- span_text: exact text where found
+- confidence: 0.0-1.0
+
+ENTITY TYPES TO EXTRACT:
+- Person: individuals by name (include role: plaintiff, defendant, witness, attorney, judge, expert)
+- Organization: companies, firms, courts, agencies, government bodies
+- Location: cities, states, countries, addresses, jurisdictions
+- Money: ALL dollar amounts, fees, damages, payments (include: amount, currency, purpose)
+- Date: ALL dates mentioned (include: context - filing date, deadline, event date)
+- Document: contracts, agreements, exhibits, motions, orders, filings
+- Clause: specific contract sections, terms, provisions
+- Reference: case citations, statute references, exhibit numbers
+
+RELATIONSHIP EXTRACTION (capture ALL connections):
+- source_name, target_name: exact entity names
+- relation_type: represents/party_to/signed/employed_by/affiliated_with/testified/references/binds/related_to/owns/controls/parent_of/subsidiary_of/predecessor_of/successor_to/opposes/agrees_with/disputes/authored/filed/received/paid/owed
+- properties: {{context, date, amount, document}}
+- confidence: 0.0-1.0
+
+INFER IMPLICIT RELATIONSHIPS:
+- If A represents B in case X → A party_to X, B party_to X
+- If A is CEO of B → A employed_by B, A controls B
+- If A signed doc D as representative of B → A signed D, B party_to D
+- If A paid B $X → A paid B (with amount), B received from A
+- If A and B are opposing parties → A opposes B
+
+FACT EXTRACTION (capture ALL significant facts):
+- fact_type: obligation/admission/deadline/key_term/allegation/finding/ruling/quote/payment/breach/damage/claim
+- text: the fact content (verbatim for quotes, summarized otherwise)
+- related_entities: ALL entity names this fact involves
+- properties: {{due_date, amount, source_document, paragraph, severity}}
+- confidence: 0.0-1.0
+
+FACT TYPES TO EXTRACT:
+- obligation: duties, requirements ("shall", "must", "agrees to")
+- deadline: time limits, due dates, statute of limitations
+- allegation: claims, accusations made by parties
+- finding: court findings, arbitrator determinations
+- ruling: judge orders, decisions, judgments
+- breach: alleged or proven contract breaches
+- damage: harm claimed or proven
+- payment: money transferred or owed
+- key_term: important defined terms, thresholds, percentages
+- quote: significant verbatim statements
 
 TEXT:
 {text}
 
-EXISTING ENTITIES (reference these, avoid duplicates):
+EXISTING ENTITIES (link to these when mentioned, use their exact names):
 {existing_entities}
 
 Output compact JSON only:"""
@@ -518,11 +563,212 @@ Output only valid JSON array of facts:
         return results
 
 
+class RelationshipInferrer:
+    """Infer implicit relationships from extracted entities and facts."""
+
+    # Patterns for inferring relationships
+    ROLE_TO_RELATION = {
+        'plaintiff': ('party_to', 'opposes'),
+        'defendant': ('party_to', 'opposes'),
+        'claimant': ('party_to', 'opposes'),
+        'respondent': ('party_to', 'opposes'),
+        'petitioner': ('party_to', None),
+        'attorney': ('represents', None),
+        'counsel': ('represents', None),
+        'lawyer': ('represents', None),
+        'judge': ('presides_over', None),
+        'arbitrator': ('presides_over', None),
+        'witness': ('testified_in', None),
+        'expert': ('testified_in', None),
+        'ceo': ('controls', 'employed_by'),
+        'president': ('controls', 'employed_by'),
+        'director': ('controls', 'employed_by'),
+        'officer': ('employed_by', None),
+        'employee': ('employed_by', None),
+        'shareholder': ('owns', None),
+        'owner': ('owns', 'controls'),
+        'subsidiary': ('subsidiary_of', None),
+        'parent': ('parent_of', None),
+        'successor': ('successor_to', None),
+        'predecessor': ('predecessor_of', None),
+    }
+
+    @staticmethod
+    def infer_relationships(
+        entities: List[ExtractedEntity],
+        relations: List[ExtractedRelation],
+        facts: List[ExtractedFact]
+    ) -> List[ExtractedRelation]:
+        """Infer additional relationships from extracted data."""
+        inferred = []
+        existing_pairs = {(r.source_name.lower(), r.target_name.lower(), r.relation_type) for r in relations}
+
+        # Build entity lookup
+        entity_by_name = {e.name.lower(): e for e in entities}
+        orgs = [e for e in entities if e.type == 'Organization']
+        people = [e for e in entities if e.type == 'Person']
+        documents = [e for e in entities if e.type in ('Document', 'Reference')]
+
+        # 1. Infer from entity roles
+        for entity in entities:
+            props = entity.properties if isinstance(entity.properties, dict) else {}
+            role = props.get('role', '').lower()
+
+            if role in RelationshipInferrer.ROLE_TO_RELATION:
+                rel_type, secondary_rel = RelationshipInferrer.ROLE_TO_RELATION[role]
+
+                # For party roles, link to organizations or the case
+                if role in ('plaintiff', 'defendant', 'claimant', 'respondent'):
+                    for doc in documents:
+                        if 'case' in doc.name.lower() or 'v.' in doc.name or 'vs' in doc.name.lower():
+                            pair = (entity.name.lower(), doc.name.lower(), 'party_to')
+                            if pair not in existing_pairs:
+                                inferred.append(ExtractedRelation(
+                                    source_name=entity.name,
+                                    target_name=doc.name,
+                                    relation_type='party_to',
+                                    properties={'inferred': True, 'role': role},
+                                    confidence=0.7
+                                ))
+                                existing_pairs.add(pair)
+
+                # For attorney roles, link to clients (other parties)
+                elif role in ('attorney', 'counsel', 'lawyer'):
+                    # Try to infer client from context
+                    client_hint = props.get('client', props.get('for', props.get('representing', '')))
+                    if client_hint:
+                        pair = (entity.name.lower(), client_hint.lower(), 'represents')
+                        if pair not in existing_pairs:
+                            inferred.append(ExtractedRelation(
+                                source_name=entity.name,
+                                target_name=client_hint,
+                                relation_type='represents',
+                                properties={'inferred': True},
+                                confidence=0.6
+                            ))
+                            existing_pairs.add(pair)
+
+                # For executive roles, link to organization
+                elif role in ('ceo', 'president', 'director', 'officer'):
+                    org_hint = props.get('company', props.get('organization', props.get('of', '')))
+                    if org_hint:
+                        pair = (entity.name.lower(), org_hint.lower(), 'employed_by')
+                        if pair not in existing_pairs:
+                            inferred.append(ExtractedRelation(
+                                source_name=entity.name,
+                                target_name=org_hint,
+                                relation_type='employed_by',
+                                properties={'inferred': True, 'role': role},
+                                confidence=0.8
+                            ))
+                            existing_pairs.add(pair)
+
+        # 2. Infer opposing party relationships
+        plaintiffs = [e for e in entities if e.properties.get('role', '').lower() in ('plaintiff', 'claimant')]
+        defendants = [e for e in entities if e.properties.get('role', '').lower() in ('defendant', 'respondent')]
+
+        for p in plaintiffs:
+            for d in defendants:
+                pair = (p.name.lower(), d.name.lower(), 'opposes')
+                if pair not in existing_pairs:
+                    inferred.append(ExtractedRelation(
+                        source_name=p.name,
+                        target_name=d.name,
+                        relation_type='opposes',
+                        properties={'inferred': True, 'context': 'opposing parties'},
+                        confidence=0.9
+                    ))
+                    existing_pairs.add(pair)
+
+        # 3. Infer from facts
+        for fact in facts:
+            related = fact.related_entities if isinstance(fact.related_entities, list) else []
+            props = fact.properties if isinstance(fact.properties, dict) else {}
+
+            # Payment facts -> paid/received relationships
+            if fact.fact_type in ('payment', 'paid'):
+                if len(related) >= 2:
+                    pair = (related[0].lower() if isinstance(related[0], str) else '',
+                           related[1].lower() if isinstance(related[1], str) else '', 'paid')
+                    if pair[0] and pair[1] and pair not in existing_pairs:
+                        inferred.append(ExtractedRelation(
+                            source_name=related[0] if isinstance(related[0], str) else str(related[0]),
+                            target_name=related[1] if isinstance(related[1], str) else str(related[1]),
+                            relation_type='paid',
+                            properties={'inferred': True, 'amount': props.get('amount', '')},
+                            confidence=0.7
+                        ))
+                        existing_pairs.add(pair)
+
+            # Breach facts -> breached relationship
+            elif fact.fact_type == 'breach':
+                for entity_ref in related:
+                    entity_name = entity_ref if isinstance(entity_ref, str) else str(entity_ref)
+                    # Find the contract/agreement
+                    for doc in documents:
+                        if any(word in doc.name.lower() for word in ['agreement', 'contract', 'covenant']):
+                            pair = (entity_name.lower(), doc.name.lower(), 'breached')
+                            if pair not in existing_pairs:
+                                inferred.append(ExtractedRelation(
+                                    source_name=entity_name,
+                                    target_name=doc.name,
+                                    relation_type='breached',
+                                    properties={'inferred': True, 'fact': fact.text[:100]},
+                                    confidence=0.6
+                                ))
+                                existing_pairs.add(pair)
+
+            # Obligation facts -> binds relationship
+            elif fact.fact_type == 'obligation':
+                for entity_ref in related:
+                    entity_name = entity_ref if isinstance(entity_ref, str) else str(entity_ref)
+                    for doc in documents:
+                        pair = (doc.name.lower(), entity_name.lower(), 'binds')
+                        if pair not in existing_pairs:
+                            inferred.append(ExtractedRelation(
+                                source_name=doc.name,
+                                target_name=entity_name,
+                                relation_type='binds',
+                                properties={'inferred': True, 'obligation': fact.text[:100]},
+                                confidence=0.6
+                            ))
+                            existing_pairs.add(pair)
+
+        # 4. Infer corporate relationships from naming patterns
+        for org in orgs:
+            org_name_lower = org.name.lower()
+            for other_org in orgs:
+                if org.name == other_org.name:
+                    continue
+                other_name_lower = other_org.name.lower()
+
+                # Check for parent/subsidiary patterns
+                if org_name_lower in other_name_lower or other_name_lower in org_name_lower:
+                    # Longer name is likely the full/parent entity
+                    if len(org.name) > len(other_org.name):
+                        pair = (other_org.name.lower(), org.name.lower(), 'affiliated_with')
+                    else:
+                        pair = (org.name.lower(), other_org.name.lower(), 'affiliated_with')
+
+                    if pair not in existing_pairs:
+                        inferred.append(ExtractedRelation(
+                            source_name=pair[0],
+                            target_name=pair[1],
+                            relation_type='affiliated_with',
+                            properties={'inferred': True, 'reason': 'name_similarity'},
+                            confidence=0.5
+                        ))
+                        existing_pairs.add(pair)
+
+        return inferred
+
+
 class BatchSemanticExtractor:
     """Batch extraction for multiple chunks."""
 
     def __init__(self, api_key: str = GEMINI_API_KEY):
         self.extractor = SemanticExtractor(api_key)
+        self.inferrer = RelationshipInferrer()
 
     def extract_from_chunks(self, chunks: List[str], existing_entities: List[str] = None) -> SemanticExtraction:
         """Extract from multiple chunks and merge results."""

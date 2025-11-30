@@ -35,7 +35,7 @@ from ..parsing.document_parser import DocumentParser, ParsedDocument
 from ..parsing.chunker import Chunker, Chunk
 from ..embeddings.vector_store import VectorStore, EmbeddingGenerator
 from .structural_extractor import StructuralExtractor, StructuralExtraction
-from .semantic_extractor import SemanticExtractor, SemanticExtraction, ExtractedEntity
+from .semantic_extractor import SemanticExtractor, SemanticExtraction, ExtractedEntity, RelationshipInferrer
 from ..config import GEMINI_API_KEY, RESOLUTION_CONFIDENCE_THRESHOLD
 
 # Parallel processing settings
@@ -64,6 +64,167 @@ class GlobalRateLimiter:
 
 # Global rate limiter instance
 _global_rate_limiter = GlobalRateLimiter()
+
+
+class EntityNormalizer:
+    """Normalize and match entity names for better coreference resolution."""
+
+    # Common suffixes to strip for matching
+    ORG_SUFFIXES = [
+        ', Inc.', ', Inc', ' Inc.', ' Inc', ' LLC', ' L.L.C.', ' LLP', ' L.L.P.',
+        ', Ltd.', ', Ltd', ' Ltd.', ' Ltd', ' Corp.', ' Corp', ' Corporation',
+        ' Co.', ' Co', ' Company', ' & Co.', ' & Co', ' PLC', ' plc',
+        ' Limited', ' Incorporated', ' Associates', ' & Associates',
+        ' Partners', ' & Partners', ' Group', ' Holdings', ' International',
+    ]
+
+    # Common title prefixes for people
+    PERSON_PREFIXES = [
+        'Mr. ', 'Mrs. ', 'Ms. ', 'Miss ', 'Dr. ', 'Prof. ', 'Professor ',
+        'Hon. ', 'Honorable ', 'Judge ', 'Justice ', 'Sen. ', 'Senator ',
+        'Rep. ', 'Representative ', 'Atty. ', 'Attorney ', 'Esq.',
+    ]
+
+    # Common abbreviation mappings
+    ABBREVIATIONS = {
+        'intl': 'international',
+        'int\'l': 'international',
+        'natl': 'national',
+        'nat\'l': 'national',
+        'corp': 'corporation',
+        'assoc': 'associates',
+        'mgmt': 'management',
+        'svcs': 'services',
+        'svc': 'service',
+        'tech': 'technology',
+        'sys': 'systems',
+        'grp': 'group',
+        'hldgs': 'holdings',
+        'mfg': 'manufacturing',
+        'dist': 'distribution',
+        'dev': 'development',
+    }
+
+    @staticmethod
+    def normalize_org_name(name: str) -> str:
+        """Normalize organization name for matching."""
+        normalized = name.strip()
+
+        # Remove common suffixes
+        for suffix in EntityNormalizer.ORG_SUFFIXES:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)].strip()
+            elif normalized.lower().endswith(suffix.lower()):
+                normalized = normalized[:-len(suffix)].strip()
+
+        # Expand abbreviations
+        words = normalized.split()
+        expanded = []
+        for word in words:
+            word_lower = word.lower().rstrip('.,')
+            if word_lower in EntityNormalizer.ABBREVIATIONS:
+                expanded.append(EntityNormalizer.ABBREVIATIONS[word_lower])
+            else:
+                expanded.append(word)
+        normalized = ' '.join(expanded)
+
+        return normalized.strip()
+
+    @staticmethod
+    def normalize_person_name(name: str) -> str:
+        """Normalize person name for matching."""
+        normalized = name.strip()
+
+        # Remove title prefixes
+        for prefix in EntityNormalizer.PERSON_PREFIXES:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].strip()
+            elif normalized.lower().startswith(prefix.lower()):
+                normalized = normalized[len(prefix):].strip()
+
+        # Remove trailing suffixes like Jr., Sr., III, Esq.
+        suffixes = [', Jr.', ', Jr', ' Jr.', ' Jr', ', Sr.', ', Sr', ' Sr.', ' Sr',
+                   ', III', ' III', ', II', ' II', ', IV', ' IV', ', Esq.', ', Esq', ' Esq.', ' Esq']
+        for suffix in suffixes:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)].strip()
+
+        return normalized.strip()
+
+    @staticmethod
+    def normalize_name(name: str, entity_type: str = None) -> str:
+        """Normalize entity name based on type."""
+        if entity_type == 'Organization':
+            return EntityNormalizer.normalize_org_name(name)
+        elif entity_type == 'Person':
+            return EntityNormalizer.normalize_person_name(name)
+        else:
+            return name.strip()
+
+    @staticmethod
+    def compute_similarity(name1: str, name2: str, entity_type: str = None) -> float:
+        """Compute similarity score between two entity names."""
+        from difflib import SequenceMatcher
+
+        # Normalize both names
+        n1 = EntityNormalizer.normalize_name(name1, entity_type).lower()
+        n2 = EntityNormalizer.normalize_name(name2, entity_type).lower()
+
+        # Exact match after normalization
+        if n1 == n2:
+            return 1.0
+
+        # Check if one contains the other (partial match)
+        if n1 in n2 or n2 in n1:
+            shorter = min(len(n1), len(n2))
+            longer = max(len(n1), len(n2))
+            return 0.7 + (0.3 * shorter / longer)
+
+        # Check word overlap for organizations
+        if entity_type == 'Organization':
+            words1 = set(n1.split())
+            words2 = set(n2.split())
+            if words1 and words2:
+                overlap = len(words1 & words2)
+                total = len(words1 | words2)
+                if overlap > 0:
+                    jaccard = overlap / total
+                    # High overlap is a good signal
+                    if jaccard > 0.5:
+                        return 0.6 + (0.4 * jaccard)
+
+        # Check if person names match (last name + first initial)
+        if entity_type == 'Person':
+            parts1 = n1.split()
+            parts2 = n2.split()
+            if len(parts1) >= 2 and len(parts2) >= 2:
+                # Check last name match
+                if parts1[-1] == parts2[-1]:
+                    # Check first name or initial match
+                    if parts1[0] == parts2[0]:
+                        return 0.95
+                    elif parts1[0][0] == parts2[0][0]:
+                        return 0.8
+
+        # Fall back to sequence matching
+        ratio = SequenceMatcher(None, n1, n2).ratio()
+        return ratio
+
+    @staticmethod
+    def find_best_match(name: str, candidates: List, entity_type: str = None, threshold: float = 0.75):
+        """Find the best matching entity from candidates."""
+        best_match = None
+        best_score = 0
+
+        for candidate in candidates:
+            candidate_name = candidate.canonical_name if hasattr(candidate, 'canonical_name') else str(candidate)
+            score = EntityNormalizer.compute_similarity(name, candidate_name, entity_type)
+
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = candidate
+
+        return best_match, best_score
 
 
 class ExtractionPipeline:
@@ -147,6 +308,14 @@ class ExtractionPipeline:
             all_entities.extend(extraction.entities)
             all_relations.extend(extraction.relations)
             all_facts.extend(extraction.facts)
+
+        # Infer additional relationships from extracted data
+        _print("\n[4.5/6] Inferring implicit relationships...")
+        inferred_relations = RelationshipInferrer.infer_relationships(
+            all_entities, all_relations, all_facts
+        )
+        _print(f"  Inferred {len(inferred_relations)} additional relationships")
+        all_relations.extend(inferred_relations)
 
         # Step 5: Entity resolution and storage
         _print("\n[5/6] Resolving and storing entities...")
@@ -402,6 +571,7 @@ class ExtractionPipeline:
     def _resolve_and_store_entities(self, entities: List[ExtractedEntity], doc_id: str, full_text: str) -> Dict[str, str]:
         """Resolve extracted entities against existing graph and store.
 
+        Uses EntityNormalizer for improved coreference resolution.
         Returns mapping of entity name -> entity ID.
         """
         entity_map = {}
@@ -410,19 +580,65 @@ class ExtractionPipeline:
             if not entity.name or len(entity.name) < 2:
                 continue
 
+            # Normalize the entity name
+            normalized_name = EntityNormalizer.normalize_name(entity.name, entity.type)
+
             # Check if entity already exists (by name match)
-            existing = self.db.search_entities_by_name(entity.name, limit=5)
+            existing = self.db.search_entities_by_name(entity.name, limit=10)
+
+            # Also search by normalized name if different
+            if normalized_name != entity.name:
+                normalized_matches = self.db.search_entities_by_name(normalized_name, limit=5)
+                for nm in normalized_matches:
+                    if nm not in existing:
+                        existing.append(nm)
 
             if existing:
-                # Check for exact match
-                exact_match = None
-                for e in existing:
-                    if e.canonical_name.lower() == entity.name.lower():
-                        exact_match = e
-                        break
+                # Use improved matching with EntityNormalizer
+                best_match, match_score = EntityNormalizer.find_best_match(
+                    entity.name, existing, entity.type, threshold=0.8
+                )
 
-                if exact_match:
-                    entity_map[entity.name] = exact_match.id
+                if best_match and match_score >= 0.9:
+                    # High confidence match - use existing entity
+                    entity_map[entity.name] = best_match.id
+                    # Add as alias if name is different
+                    if entity.name.lower() != best_match.canonical_name.lower():
+                        self.db.add_alias(Alias.create(best_match.id, entity.name, "extracted"))
+                    continue
+
+                elif best_match and match_score >= 0.8:
+                    # Good match - use existing but check embedding for confirmation
+                    if self.vector_store.get_count() > 0:
+                        query_embedding = self.embedding_generator.generate_query_embedding(
+                            f"{entity.name} {entity.type}"
+                        )
+                        similar = self.vector_store.search(query_embedding, k=3)
+
+                        # If embedding also confirms, use the match
+                        for sim_id, emb_score in similar:
+                            if sim_id == best_match.id and emb_score > 0.6:
+                                entity_map[entity.name] = best_match.id
+                                if entity.name.lower() != best_match.canonical_name.lower():
+                                    self.db.add_alias(Alias.create(best_match.id, entity.name, "extracted"))
+                                break
+                        else:
+                            # Embedding doesn't confirm - queue for review
+                            self.db.add_to_resolution_queue(
+                                surface_text=entity.name,
+                                context=entity.span_text[:200],
+                                doc_id=doc_id,
+                                span_start=entity.properties.get('chunk_start', 0),
+                                span_end=entity.properties.get('chunk_end', 0),
+                                candidates=[{"entity_id": best_match.id, "score": float(match_score)}]
+                            )
+                            new_id = self._create_new_entity(entity, doc_id, full_text)
+                            entity_map[entity.name] = new_id
+                    else:
+                        # No embeddings - trust the normalizer match
+                        entity_map[entity.name] = best_match.id
+                        if entity.name.lower() != best_match.canonical_name.lower():
+                            self.db.add_alias(Alias.create(best_match.id, entity.name, "extracted"))
                     continue
 
                 # Try embedding similarity for fuzzy match
@@ -436,15 +652,17 @@ class ExtractionPipeline:
                         if score > RESOLUTION_CONFIDENCE_THRESHOLD:
                             sim_entity = self.db.get_entity(sim_id)
                             if sim_entity and sim_entity.type == entity.type:
-                                # High confidence match - link to existing
-                                entity_map[entity.name] = sim_id
-                                # Add as alias
-                                self.db.add_alias(Alias.create(sim_id, entity.name, "extracted"))
-                                break
+                                # Verify with normalizer
+                                norm_score = EntityNormalizer.compute_similarity(
+                                    entity.name, sim_entity.canonical_name, entity.type
+                                )
+                                if norm_score > 0.6 or score > 0.85:
+                                    entity_map[entity.name] = sim_id
+                                    self.db.add_alias(Alias.create(sim_id, entity.name, "extracted"))
+                                    break
                     else:
-                        # No high confidence match - add to resolution queue or create new
+                        # No high confidence match
                         if similar and similar[0][1] > 0.5:
-                            # Medium confidence - queue for review
                             self.db.add_to_resolution_queue(
                                 surface_text=entity.name,
                                 context=entity.span_text[:200],
@@ -453,15 +671,9 @@ class ExtractionPipeline:
                                 span_end=entity.properties.get('chunk_end', 0),
                                 candidates=[{"entity_id": eid, "score": float(s)} for eid, s in similar[:3]]
                             )
-                            # Still create new entity (user can merge later)
-                            new_id = self._create_new_entity(entity, doc_id, full_text)
-                            entity_map[entity.name] = new_id
-                        else:
-                            # Low confidence - create new
-                            new_id = self._create_new_entity(entity, doc_id, full_text)
-                            entity_map[entity.name] = new_id
+                        new_id = self._create_new_entity(entity, doc_id, full_text)
+                        entity_map[entity.name] = new_id
                 else:
-                    # No embeddings yet - use simple matching
                     new_id = self._create_new_entity(entity, doc_id, full_text)
                     entity_map[entity.name] = new_id
             else:
