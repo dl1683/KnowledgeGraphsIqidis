@@ -1322,6 +1322,171 @@ def api_shortest_path():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Entity Importance Scoring ====================
+
+@api.route('/importance')
+def api_importance():
+    """Score entities by importance using multiple metrics."""
+    limit = int(request.args.get('limit', 30))
+    entity_type = request.args.get('type')
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get entities
+        if entity_type:
+            cursor.execute('SELECT id, canonical_name, type, confidence FROM entities WHERE type = ?',
+                          (entity_type,))
+        else:
+            cursor.execute('SELECT id, canonical_name, type, confidence FROM entities')
+        entities = {row['id']: dict(row) for row in cursor.fetchall()}
+
+        # Get edges
+        cursor.execute('SELECT source_entity_id, target_entity_id, relation_type FROM edges')
+        edges = [dict(row) for row in cursor.fetchall()]
+
+        # Calculate metrics
+        in_degree = {eid: 0 for eid in entities}
+        out_degree = {eid: 0 for eid in entities}
+        relation_diversity = {eid: set() for eid in entities}
+
+        for edge in edges:
+            src, tgt = edge['source_entity_id'], edge['target_entity_id']
+            rel = edge['relation_type']
+            if src in out_degree:
+                out_degree[src] += 1
+                relation_diversity[src].add(rel)
+            if tgt in in_degree:
+                in_degree[tgt] += 1
+                relation_diversity[tgt].add(rel)
+
+        # Get mention counts
+        cursor.execute('''
+            SELECT entity_id, COUNT(*) as mention_count
+            FROM mentions
+            GROUP BY entity_id
+        ''')
+        mention_counts = {row['entity_id']: row['mention_count'] for row in cursor.fetchall()}
+
+        # Get alias counts (more aliases = more prominent)
+        cursor.execute('''
+            SELECT entity_id, COUNT(*) as alias_count
+            FROM aliases
+            GROUP BY entity_id
+        ''')
+        alias_counts = {row['entity_id']: row['alias_count'] for row in cursor.fetchall()}
+
+        # Build undirected adjacency for PageRank
+        adj = {}
+        for edge in edges:
+            src, tgt = edge['source_entity_id'], edge['target_entity_id']
+            if src not in adj:
+                adj[src] = set()
+            if tgt not in adj:
+                adj[tgt] = set()
+            adj[src].add(tgt)
+            adj[tgt].add(src)
+
+        # Simplified PageRank
+        n = len(entities)
+        pr = {eid: 1.0 / n for eid in entities}
+        damping = 0.85
+
+        for _ in range(50):
+            new_pr = {}
+            for node in entities:
+                rank = (1 - damping) / n
+                for other in entities:
+                    if node in adj.get(other, set()):
+                        out_deg = len(adj.get(other, set()))
+                        if out_deg > 0:
+                            rank += damping * pr[other] / out_deg
+                new_pr[node] = rank
+            pr = new_pr
+
+        # Calculate composite importance score
+        importance_scores = []
+        for eid, entity in entities.items():
+            total_degree = in_degree.get(eid, 0) + out_degree.get(eid, 0)
+            mentions = mention_counts.get(eid, 0)
+            aliases = alias_counts.get(eid, 0)
+            rel_types = len(relation_diversity.get(eid, set()))
+            pagerank = pr.get(eid, 0)
+
+            # Confidence boost
+            conf_boost = 1.2 if entity['confidence'] == 'confirmed' else 1.0
+
+            # Composite score (weighted combination)
+            score = (
+                0.25 * min(total_degree / 20, 1.0) +  # Degree (normalized to ~20)
+                0.25 * pagerank * n +                  # PageRank (scaled up)
+                0.20 * min(mentions / 10, 1.0) +       # Mentions
+                0.15 * min(rel_types / 5, 1.0) +       # Relationship diversity
+                0.15 * min(aliases / 3, 1.0)           # Aliases
+            ) * conf_boost
+
+            importance_scores.append({
+                'entity_id': eid,
+                'name': entity['canonical_name'],
+                'type': entity['type'],
+                'confidence': entity['confidence'],
+                'importance_score': round(score, 4),
+                'metrics': {
+                    'in_degree': in_degree.get(eid, 0),
+                    'out_degree': out_degree.get(eid, 0),
+                    'total_degree': total_degree,
+                    'pagerank': round(pagerank, 6),
+                    'mention_count': mentions,
+                    'alias_count': aliases,
+                    'relation_type_count': rel_types
+                }
+            })
+
+        # Sort by importance score
+        importance_scores.sort(key=lambda x: x['importance_score'], reverse=True)
+
+        return jsonify({
+            'total_entities': len(entities),
+            'rankings': importance_scores[:limit]
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== Temporal Queries ====================
+
+@api.route('/temporal')
+def api_temporal():
+    """Query entities and facts by time range."""
+    start_year = request.args.get('start_year', type=int)
+    end_year = request.args.get('end_year', type=int)
+    query = request.args.get('query', '')
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+
+        if query:
+            # Parse natural language temporal query
+            result = query_engine.query_by_timeframe(query)
+        else:
+            # Use explicit year range
+            result = query_engine.temporal_query(start_year=start_year, end_year=end_year)
+
+        return jsonify(result)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== Find Connections ====================
 
 @api.route('/connections')

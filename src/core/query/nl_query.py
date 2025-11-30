@@ -914,3 +914,208 @@ SAMPLE ENTITIES:
             }
             for e in entities
         ]
+
+    def _parse_date(self, date_str: str) -> Optional[Tuple[int, int, int]]:
+        """Parse date string into (year, month, day) tuple."""
+        import re
+        from datetime import datetime
+
+        if not date_str:
+            return None
+
+        # Try common date formats
+        formats = [
+            '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%B %d, %Y', '%b %d, %Y',
+            '%Y', '%B %Y', '%b %Y', '%m/%Y', '%Y/%m/%d'
+        ]
+
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(date_str.strip(), fmt)
+                return (dt.year, dt.month, dt.day)
+            except ValueError:
+                continue
+
+        # Try to extract year at least
+        year_match = re.search(r'\b(19|20)\d{2}\b', date_str)
+        if year_match:
+            return (int(year_match.group()), 1, 1)
+
+        return None
+
+    def _extract_date_from_entity(self, entity) -> Optional[Tuple[int, int, int]]:
+        """Extract date from Date entity or entity properties."""
+        if entity.type == 'Date':
+            # Try canonical name first
+            parsed = self._parse_date(entity.canonical_name)
+            if parsed:
+                return parsed
+
+            # Try properties
+            props = entity.properties or {}
+            for key in ['date', 'value', 'full_date']:
+                if key in props:
+                    parsed = self._parse_date(str(props[key]))
+                    if parsed:
+                        return parsed
+
+        # Check properties for date fields on any entity
+        props = entity.properties or {}
+        for key in ['date', 'due_date', 'deadline', 'effective_date', 'filing_date']:
+            if key in props:
+                parsed = self._parse_date(str(props[key]))
+                if parsed:
+                    return parsed
+
+        return None
+
+    def temporal_query(self, start_year: int = None, end_year: int = None,
+                      start_month: int = None, end_month: int = None) -> Dict[str, Any]:
+        """Query entities and facts within a time range.
+
+        Returns entities and facts organized chronologically.
+        """
+        results = {
+            'dates': [],
+            'facts_with_dates': [],
+            'timeline': []
+        }
+
+        # Get all Date entities
+        date_entities = self.db.get_entities_by_type('Date', limit=500)
+
+        for entity in date_entities:
+            parsed = self._extract_date_from_entity(entity)
+            if not parsed:
+                continue
+
+            year, month, day = parsed
+
+            # Apply filters
+            if start_year and year < start_year:
+                continue
+            if end_year and year > end_year:
+                continue
+            if start_month and month < start_month:
+                continue
+            if end_month and month > end_month:
+                continue
+
+            # Get related entities and facts
+            neighbors = self.db.get_entity_neighbors(entity.id, max_hops=1)
+
+            related_facts = []
+            related_entities = []
+            for e in neighbors['entities']:
+                if e.type == 'Fact':
+                    related_facts.append({
+                        'id': e.id,
+                        'text': e.properties.get('full_text', e.canonical_name)[:200],
+                        'type': e.properties.get('fact_type', 'fact')
+                    })
+                else:
+                    related_entities.append({
+                        'id': e.id,
+                        'name': e.canonical_name,
+                        'type': e.type
+                    })
+
+            results['dates'].append({
+                'id': entity.id,
+                'name': entity.canonical_name,
+                'date': {'year': year, 'month': month, 'day': day},
+                'properties': entity.properties,
+                'related_facts': related_facts,
+                'related_entities': related_entities
+            })
+
+        # Get Facts with date properties
+        fact_entities = self.db.get_entities_by_type('Fact', limit=500)
+        for fact in fact_entities:
+            props = fact.properties or {}
+            for date_key in ['due_date', 'deadline', 'date', 'effective_date']:
+                if date_key in props:
+                    parsed = self._parse_date(str(props[date_key]))
+                    if parsed:
+                        year, month, day = parsed
+                        if start_year and year < start_year:
+                            continue
+                        if end_year and year > end_year:
+                            continue
+
+                        results['facts_with_dates'].append({
+                            'id': fact.id,
+                            'text': props.get('full_text', fact.canonical_name)[:200],
+                            'fact_type': props.get('fact_type', 'fact'),
+                            'date': {'year': year, 'month': month, 'day': day},
+                            'date_field': date_key
+                        })
+                        break
+
+        # Build unified timeline
+        timeline = []
+
+        for d in results['dates']:
+            timeline.append({
+                'date': d['date'],
+                'type': 'date_entity',
+                'name': d['name'],
+                'id': d['id'],
+                'related_count': len(d['related_facts']) + len(d['related_entities'])
+            })
+
+        for f in results['facts_with_dates']:
+            timeline.append({
+                'date': f['date'],
+                'type': 'fact',
+                'name': f['text'][:100],
+                'id': f['id'],
+                'fact_type': f['fact_type']
+            })
+
+        # Sort by date
+        def sort_key(item):
+            d = item['date']
+            return (d['year'], d['month'], d['day'])
+
+        timeline.sort(key=sort_key)
+        results['timeline'] = timeline
+
+        return results
+
+    def query_by_timeframe(self, query: str) -> Dict[str, Any]:
+        """Parse temporal query and return results.
+
+        Supports queries like:
+        - "What happened in 2023?"
+        - "Show events before January 2024"
+        - "Timeline from 2022 to 2023"
+        """
+        import re
+
+        query_lower = query.lower()
+
+        # Extract year ranges
+        year_pattern = r'\b(19|20)\d{2}\b'
+        years = re.findall(year_pattern, query)
+        years = [int(y[:4]) if len(y) >= 4 else int(y) for y in re.findall(r'\b((?:19|20)\d{2})\b', query)]
+
+        start_year = None
+        end_year = None
+
+        if 'before' in query_lower and years:
+            end_year = years[0]
+        elif 'after' in query_lower and years:
+            start_year = years[0]
+        elif 'from' in query_lower and 'to' in query_lower and len(years) >= 2:
+            start_year = min(years)
+            end_year = max(years)
+        elif 'between' in query_lower and len(years) >= 2:
+            start_year = min(years)
+            end_year = max(years)
+        elif years:
+            # Single year - treat as that year only
+            start_year = years[0]
+            end_year = years[0]
+
+        return self.temporal_query(start_year=start_year, end_year=end_year)
