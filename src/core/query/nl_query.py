@@ -728,6 +728,43 @@ Output as JSON array:
                 type_entities = self.db.get_entities_by_type(entity_type, limit=20)
                 entities.extend(type_entities)
 
+        # Role-based person search: look for facts mentioning roles
+        query_lower = interpretation.get('_original_query', '').lower()
+        role_keywords = {
+            'expert': ['expert', 'expert witness', 'damages expert', 'rebuttal expert'],
+            'witness': ['witness', 'expert witness', 'testif'],
+            'counsel': ['counsel', 'attorney', 'lawyer', 'law firm'],
+            'arbitrator': ['arbitrator', 'arbitral', 'panel'],
+        }
+
+        for role, keywords in role_keywords.items():
+            if role in query_lower:
+                # Search for facts containing role keywords directly
+                # Use text search on entity names which include "expert", etc.
+                for kw in keywords:
+                    matched_entities = self.db.search_entities_by_name(kw, limit=50)
+                    for entity in matched_entities:
+                        if entity.type == "Fact" and entity.id not in entity_ids_seen:
+                            facts.append({
+                                "type": entity.properties.get("fact_type", "finding"),
+                                "text": entity.properties.get("full_text", entity.canonical_name),
+                                "entity_name": entity.canonical_name,
+                                "role_keyword": role
+                            })
+                            entities.append(entity)
+                            entity_ids_seen.add(entity.id)
+
+                            # Try to extract person names from this fact
+                            full_text = entity.properties.get('full_text', entity.canonical_name)
+                            # Search for people entities mentioned in this fact
+                            people = self.db.get_entities_by_type("Person", limit=100)
+                            for person in people:
+                                if person.canonical_name.lower() in full_text.lower():
+                                    if person.id not in entity_ids_seen:
+                                        entities.append(person)
+                                        entity_ids_seen.add(person.id)
+                break  # Only match one role keyword group
+
         # If no entities found from names, try embedding search
         if not entities and mentioned:
             for name in mentioned:
@@ -772,13 +809,78 @@ Output as JSON array:
             edges.extend(path_edges)
 
         elif query_type == 'aggregation':
-            # Get counts by type
-            stats = self.db.get_stats()
-            facts.append({
-                "type": "aggregation",
-                "text": f"Graph contains: {stats['entities']} entities, {stats['edges']} edges, {stats['documents']} documents",
-                "details": stats
-            })
+            # Smart aggregation: if asking about specific things, search for them
+            query_lower = interpretation.get('_original_query', '').lower()
+
+            # Check if asking about specific fact types
+            fact_type_keywords = {
+                'allegation': 'allegation',
+                'allegations': 'allegation',
+                'finding': 'finding',
+                'findings': 'finding',
+                'obligation': 'obligation',
+                'obligations': 'obligation',
+                'deadline': 'deadline',
+                'deadlines': 'deadline',
+                'claim': 'allegation',
+                'claims': 'allegation',
+            }
+
+            target_fact_type = None
+            for keyword, fact_type in fact_type_keywords.items():
+                if keyword in query_lower:
+                    target_fact_type = fact_type
+                    break
+
+            if target_fact_type:
+                # Search for facts of this type
+                all_facts = self.db.get_entities_by_type("Fact", limit=200)
+                matching_facts = []
+                for fact in all_facts:
+                    fact_name_lower = fact.canonical_name.lower()
+                    if fact_name_lower.startswith(target_fact_type + ':') or \
+                       fact.properties.get('fact_type', '').lower() == target_fact_type:
+                        matching_facts.append(fact)
+
+                # If entities mentioned, filter to facts related to those entities
+                mentioned_entities = interpretation.get('entities_mentioned', [])
+                if mentioned_entities:
+                    # Get entity IDs for mentioned entities
+                    mentioned_entity_objs = []
+                    for name in mentioned_entities:
+                        found = self.db.search_entities_by_name(name, limit=5)
+                        mentioned_entity_objs.extend(found)
+
+                    if mentioned_entity_objs:
+                        # Filter facts to those connected to mentioned entities
+                        filtered_facts = []
+                        for fact in matching_facts:
+                            # Check if fact text mentions any of the entity names
+                            fact_text = (fact.canonical_name + ' ' +
+                                       fact.properties.get('full_text', '')).lower()
+                            for ent in mentioned_entity_objs:
+                                if ent.canonical_name.lower() in fact_text:
+                                    filtered_facts.append(fact)
+                                    break
+                        if filtered_facts:
+                            matching_facts = filtered_facts
+
+                # Add matching facts to results
+                for fact in matching_facts[:50]:
+                    facts.append({
+                        "type": fact.properties.get("fact_type", target_fact_type),
+                        "text": fact.properties.get("full_text", fact.canonical_name),
+                        "entity_name": fact.canonical_name
+                    })
+                    entities.append(fact)
+            else:
+                # Fallback to basic stats
+                stats = self.db.get_stats()
+                facts.append({
+                    "type": "aggregation",
+                    "text": f"Graph contains: {stats['entities']} entities, {stats['edges']} edges, {stats['documents']} documents",
+                    "details": stats
+                })
 
         elif query_type == 'overview':
             # Get main parties - organizations and people
