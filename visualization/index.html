@@ -860,6 +860,7 @@
                 <button class="control-btn" id="btn-facts">Show Facts</button>
                 <button class="control-btn" id="btn-edit">Edit Mode</button>
                 <button class="control-btn" id="btn-add-entity">+ Entity</button>
+                <button class="control-btn" id="btn-duplicates" style="background: #9c27b0; border-color: #9c27b0;">Find Duplicates</button>
             </div>
 
             <div id="tooltip">
@@ -1473,6 +1474,9 @@
 
             // NL Edit functionality
             setupNLEdit();
+
+            // Duplicates button
+            document.getElementById('btn-duplicates').addEventListener('click', showDuplicatesModal);
         }
 
         // ========== NL EDIT FUNCTIONALITY ==========
@@ -2035,6 +2039,93 @@
 
         function closeModal() {
             document.getElementById('edit-modal').classList.remove('active');
+        }
+
+        // ========== DUPLICATE DETECTION ==========
+        async function showDuplicatesModal() {
+            const modal = document.getElementById('edit-modal');
+            const title = document.getElementById('modal-title');
+            const content = document.getElementById('modal-content');
+
+            title.textContent = 'Finding Duplicates...';
+            content.innerHTML = '<div class="spinner" style="margin: 20px auto;"></div>';
+            modal.classList.add('active');
+
+            try {
+                const response = await fetch(`${API_BASE}/api/duplicates?threshold=0.75&limit=50`);
+                const data = await response.json();
+
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                title.textContent = `Potential Duplicates (${data.potential_duplicates} found)`;
+
+                if (data.duplicates.length === 0) {
+                    content.innerHTML = '<p style="color: #34a853;">No duplicates found! Your graph is clean.</p>';
+                    return;
+                }
+
+                content.innerHTML = `
+                    <p style="margin-bottom: 15px; color: #888;">Select pairs to merge. The longer name will be kept.</p>
+                    <div id="duplicates-list" style="max-height: 400px; overflow-y: auto;">
+                        ${data.duplicates.map((d, i) => `
+                            <div class="duplicate-item" style="padding: 10px; background: #1a1a2e; border-radius: 6px; margin-bottom: 8px;">
+                                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                                    <input type="checkbox" class="dup-checkbox" data-idx="${i}"
+                                           data-keep="${d.entity1.name.length >= d.entity2.name.length ? d.entity1.id : d.entity2.id}"
+                                           data-merge="${d.entity1.name.length >= d.entity2.name.length ? d.entity2.id : d.entity1.id}">
+                                    <span style="flex: 1;">
+                                        <span style="color: ${TYPE_COLORS[d.entity1.type] || '#999'}">${d.entity1.name}</span>
+                                        <span style="color: #666; margin: 0 5px;">↔</span>
+                                        <span style="color: ${TYPE_COLORS[d.entity2.type] || '#999'}">${d.entity2.name}</span>
+                                    </span>
+                                    <span style="color: #888; font-size: 11px;">${(d.similarity * 100).toFixed(0)}%</span>
+                                </label>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div class="modal-actions" style="margin-top: 15px;">
+                        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="mergeSelectedDuplicates()">Merge Selected</button>
+                    </div>
+                `;
+            } catch (error) {
+                content.innerHTML = `<p style="color: #ea4335;">Error: ${error.message}</p>`;
+            }
+        }
+
+        async function mergeSelectedDuplicates() {
+            const checkboxes = document.querySelectorAll('.dup-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('No duplicates selected');
+                return;
+            }
+
+            const merges = Array.from(checkboxes).map(cb => ({
+                keep_id: cb.dataset.keep,
+                merge_id: cb.dataset.merge
+            }));
+
+            try {
+                const response = await fetch(`${API_BASE}/api/batch-merge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ merges })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    alert(`Merged ${result.successful} of ${result.total} pairs`);
+                    closeModal();
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
         }
 
         // Update click handler to support edit mode
