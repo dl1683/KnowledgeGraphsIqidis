@@ -1027,6 +1027,109 @@ def api_export():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Entity Clusters ====================
+
+def _build_adjacency(edges: List[Dict]) -> Dict[str, set]:
+    """Build adjacency list from edges."""
+    adj: Dict[str, set] = {}
+    for edge in edges:
+        src = edge['source_entity_id']
+        tgt = edge['target_entity_id']
+        if src not in adj:
+            adj[src] = set()
+        if tgt not in adj:
+            adj[tgt] = set()
+        adj[src].add(tgt)
+        adj[tgt].add(src)
+    return adj
+
+
+def _find_connected_components(adj: Dict[str, set], entity_ids: set) -> List[set]:
+    """Find connected components using BFS."""
+    visited = set()
+    components = []
+
+    for start in entity_ids:
+        if start in visited:
+            continue
+
+        # BFS
+        component = set()
+        queue = [start]
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            component.add(node)
+            for neighbor in adj.get(node, []):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+        if component:
+            components.append(component)
+
+    return components
+
+
+@api.route('/clusters')
+def api_clusters():
+    """Find entity clusters (connected components) in the graph."""
+    min_size = int(request.args.get('min_size', 3))
+    entity_type = request.args.get('type')  # Optional filter
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get entities
+        if entity_type:
+            cursor.execute('SELECT id, canonical_name, type FROM entities WHERE type = ?', (entity_type,))
+        else:
+            cursor.execute('SELECT id, canonical_name, type FROM entities')
+        entities = {row['id']: dict(row) for row in cursor.fetchall()}
+
+        # Get edges
+        cursor.execute('SELECT source_entity_id, target_entity_id FROM edges')
+        edges = [dict(row) for row in cursor.fetchall()]
+
+        # Build adjacency and find components
+        adj = _build_adjacency(edges)
+        components = _find_connected_components(adj, set(entities.keys()))
+
+        # Filter by min size and sort by size descending
+        clusters = []
+        for component in components:
+            if len(component) >= min_size:
+                cluster_entities = [entities[eid] for eid in component if eid in entities]
+                # Group by type
+                by_type: Dict[str, int] = {}
+                for e in cluster_entities:
+                    t = e['type']
+                    by_type[t] = by_type.get(t, 0) + 1
+
+                clusters.append({
+                    'size': len(cluster_entities),
+                    'entities': cluster_entities[:20],  # Limit to first 20 for display
+                    'types': by_type,
+                    'sample_names': [e['canonical_name'] for e in cluster_entities[:5]]
+                })
+
+        clusters.sort(key=lambda x: x['size'], reverse=True)
+
+        return jsonify({
+            'total_clusters': len(clusters),
+            'total_entities': len(entities),
+            'isolated_entities': sum(1 for c in components if len(c) < min_size),
+            'clusters': clusters[:50]  # Top 50 clusters
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== App Factory ====================
 
 def create_app(matter_name: str, api_key: str = GEMINI_API_KEY) -> Flask:

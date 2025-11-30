@@ -862,6 +862,7 @@
                 <button class="control-btn" id="btn-add-entity">+ Entity</button>
                 <button class="control-btn" id="btn-duplicates" style="background: #9c27b0; border-color: #9c27b0;">Find Duplicates</button>
                 <button class="control-btn" id="btn-timeline" style="background: #00897b; border-color: #00897b;">Timeline</button>
+                <button class="control-btn" id="btn-clusters" style="background: #ff5722; border-color: #ff5722;">Clusters</button>
                 <div class="export-dropdown" style="position: relative; display: inline-block;">
                     <button class="control-btn" id="btn-export" style="background: #5c6bc0; border-color: #5c6bc0;">Export</button>
                     <div id="export-menu" style="display: none; position: absolute; top: 100%; right: 0; background: #16213e; border: 1px solid #0f3460; border-radius: 8px; min-width: 120px; z-index: 1000;">
@@ -1489,6 +1490,9 @@
 
             // Timeline button
             document.getElementById('btn-timeline').addEventListener('click', showTimelineModal);
+
+            // Clusters button
+            document.getElementById('btn-clusters').addEventListener('click', showClustersModal);
 
             // Export setup
             setupExport();
@@ -2195,6 +2199,61 @@
                                             Related: ${entry.related_entities.slice(0, 3).map(r => r.name).join(', ')}
                                         </div>
                                     ` : ''}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div class="modal-actions" style="margin-top: 15px;">
+                        <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+                    </div>
+                `;
+            } catch (error) {
+                content.innerHTML = `<p style="color: #ea4335;">Error: ${error.message}</p>`;
+            }
+        }
+
+        // ========== CLUSTERS FUNCTIONALITY ==========
+        async function showClustersModal() {
+            const modal = document.getElementById('edit-modal');
+            const title = document.getElementById('modal-title');
+            const content = document.getElementById('modal-content');
+
+            title.textContent = 'Finding Clusters...';
+            content.innerHTML = '<div class="spinner" style="margin: 20px auto;"></div>';
+            modal.classList.add('active');
+
+            try {
+                const response = await fetch(`${API_BASE}/api/clusters?min_size=3`);
+                const data = await response.json();
+
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                title.textContent = `Entity Clusters (${data.total_clusters} groups)`;
+
+                content.innerHTML = `
+                    <div style="margin-bottom: 15px; color: #888;">
+                        <span style="color: #4285f4;">${data.total_entities}</span> total entities |
+                        <span style="color: #34a853;">${data.total_clusters}</span> clusters |
+                        <span style="color: #fbbc04;">${data.isolated_entities}</span> isolated
+                    </div>
+                    <div id="clusters-list" style="max-height: 450px; overflow-y: auto;">
+                        ${data.clusters.map((cluster, i) => `
+                            <div class="cluster-item" style="background: #1a1a2e; border-radius: 8px; padding: 12px; margin-bottom: 10px;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                    <span style="color: #4285f4; font-weight: bold;">Cluster ${i + 1}</span>
+                                    <span style="color: #888;">${cluster.size} entities</span>
+                                </div>
+                                <div style="margin-bottom: 8px;">
+                                    ${Object.entries(cluster.types).map(([type, count]) => `
+                                        <span style="background: ${TYPE_COLORS[type] || '#666'}; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 5px;">
+                                            ${type}: ${count}
+                                        </span>
+                                    `).join('')}
+                                </div>
+                                <div style="color: #ccc; font-size: 12px;">
+                                    ${cluster.sample_names.map(n => n.substring(0, 30)).join(' | ')}${cluster.size > 5 ? ' | ...' : ''}
                                 </div>
                             </div>
                         `).join('')}
