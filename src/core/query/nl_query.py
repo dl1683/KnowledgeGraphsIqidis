@@ -41,6 +41,39 @@ class QueryResult:
 class NLQueryEngine:
     """Natural language query engine for the knowledge graph."""
 
+    # Complex query decomposition prompt
+    QUERY_DECOMPOSITION_PROMPT = """You are an expert at breaking down complex legal questions into simpler sub-queries.
+
+Given a complex question, decompose it into 2-5 simpler, atomic questions that can be answered independently and then combined.
+
+Complex Question: {query}
+
+Rules:
+1. Each sub-query should be answerable with a single graph operation
+2. Sub-queries should be ordered logically (entities first, then relationships, then facts)
+3. Include queries for both entities AND their relationships
+4. For "what" questions, include queries about relevant facts
+5. For comparison questions, query both sides
+
+Output JSON array of sub-queries with their intent:
+[
+  {{"query": "simple question 1", "intent": "find_entities|find_relationships|find_facts|find_timeline", "depends_on": null}},
+  {{"query": "simple question 2", "intent": "...", "depends_on": 0}},
+  ...
+]
+
+Examples:
+- "Who are the expert witnesses and what are their opinions?" ->
+  [{{"query": "Who are the expert witnesses?", "intent": "find_entities", "depends_on": null}},
+   {{"query": "What opinions or findings did the experts report?", "intent": "find_facts", "depends_on": 0}}]
+
+- "What is the timeline of events between the contract signing and the dispute?" ->
+  [{{"query": "When was the contract signed?", "intent": "find_timeline", "depends_on": null}},
+   {{"query": "What events occurred after the contract?", "intent": "find_timeline", "depends_on": 0}},
+   {{"query": "When did the dispute arise?", "intent": "find_timeline", "depends_on": null}}]
+
+Output only the JSON array:"""
+
     QUERY_INTERPRETATION_PROMPT = """You are a query interpreter for a legal knowledge graph. Analyze the user's question and determine:
 
 1. QUERY_TYPE: One of:
@@ -153,8 +186,131 @@ Output as JSON array:
                     raise e
         raise Exception(f"Failed after {MAX_RETRIES} retries")
 
+    def _is_complex_query(self, question: str) -> bool:
+        """Determine if a query needs decomposition."""
+        complex_indicators = [
+            ' and ', ' or ', 'compare', 'between', 'timeline', 'history',
+            'what are all', 'list all', 'summarize', 'explain the relationship',
+            'how is', 'how are', 'what happened', 'sequence of events'
+        ]
+        q_lower = question.lower()
+
+        # Multiple question marks or semicolons
+        if question.count('?') > 1 or ';' in question:
+            return True
+
+        # Contains complex indicators
+        for indicator in complex_indicators:
+            if indicator in q_lower:
+                return True
+
+        # Long questions (more than 15 words) are often complex
+        if len(question.split()) > 15:
+            return True
+
+        return False
+
+    def decompose_query(self, question: str) -> List[Dict[str, Any]]:
+        """Decompose a complex query into simpler sub-queries."""
+        prompt = self.QUERY_DECOMPOSITION_PROMPT.format(query=question)
+
+        try:
+            self._rate_limit()
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            response_text = response.text.strip()
+
+            # Parse JSON response
+            if response_text.startswith('```'):
+                response_text = re.sub(r'```(?:json)?', '', response_text).strip()
+
+            sub_queries = json.loads(response_text)
+
+            if not isinstance(sub_queries, list):
+                return [{"query": question, "intent": "general", "depends_on": None}]
+
+            return sub_queries
+
+        except Exception as e:
+            print(f"Query decomposition failed: {e}")
+            return [{"query": question, "intent": "general", "depends_on": None}]
+
+    def query_complex(self, question: str) -> QueryResult:
+        """Handle complex queries by decomposing and combining results."""
+        # Decompose the query
+        sub_queries = self.decompose_query(question)
+
+        all_entities = []
+        all_edges = []
+        all_facts = []
+        sub_answers = []
+
+        # Execute each sub-query
+        for i, sq in enumerate(sub_queries):
+            sub_q = sq.get('query', question)
+            intent = sq.get('intent', 'general')
+
+            # Execute the sub-query
+            sub_result = self._execute_single_query(sub_q)
+
+            all_entities.extend(sub_result.entities)
+            all_edges.extend(sub_result.edges)
+            all_facts.extend(sub_result.facts)
+
+            if sub_result.answer:
+                sub_answers.append(f"**{sub_q}**\n{sub_result.answer}")
+
+        # Deduplicate results
+        seen_entity_ids = set()
+        unique_entities = []
+        for e in all_entities:
+            eid = e.get('id')
+            if eid and eid not in seen_entity_ids:
+                seen_entity_ids.add(eid)
+                unique_entities.append(e)
+
+        seen_edge_ids = set()
+        unique_edges = []
+        for e in all_edges:
+            eid = e.get('id')
+            if eid and eid not in seen_edge_ids:
+                seen_edge_ids.add(eid)
+                unique_edges.append(e)
+
+        # Generate combined answer
+        if sub_answers:
+            combined_answer = "\n\n".join(sub_answers)
+        else:
+            combined_answer = self._generate_answer(question, unique_entities, unique_edges, all_facts)
+
+        return QueryResult(
+            query=question,
+            interpretation=f"Complex query decomposed into {len(sub_queries)} sub-queries",
+            entities=unique_entities,
+            edges=unique_edges,
+            facts=all_facts,
+            answer=combined_answer,
+            confidence=0.8
+        )
+
+    def _execute_single_query(self, question: str) -> QueryResult:
+        """Execute a single, atomic query."""
+        # This calls the original query logic
+        return self._query_internal(question)
+
     def query(self, question: str) -> QueryResult:
-        """Process a natural language query and return results."""
+        """Process a natural language query and return results.
+
+        Automatically detects complex queries and decomposes them.
+        """
+        # Check if this is a complex query needing decomposition
+        if self._is_complex_query(question):
+            print(f"\n[Complex Query Detected - Decomposing]")
+            return self.query_complex(question)
+
+        return self._query_internal(question)
+
+    def _query_internal(self, question: str) -> QueryResult:
+        """Internal query processing for single, atomic queries."""
         print(f"\n{'='*60}")
         print(f"Query: {question}")
         print('='*60)

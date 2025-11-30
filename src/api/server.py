@@ -1322,6 +1322,107 @@ def api_shortest_path():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Lawyer-Friendly Query Templates ====================
+
+QUERY_TEMPLATES = {
+    "parties": {
+        "name": "Who are the parties?",
+        "query": "Who are the main parties involved in this case?",
+        "description": "Identify plaintiffs, defendants, and other key parties"
+    },
+    "claims": {
+        "name": "What are the claims?",
+        "query": "What claims or allegations are being made in this case?",
+        "description": "List the main legal claims and allegations"
+    },
+    "damages": {
+        "name": "What damages are sought?",
+        "query": "What damages or monetary relief is being sought?",
+        "description": "Identify monetary amounts and types of damages claimed"
+    },
+    "timeline": {
+        "name": "Timeline of events",
+        "query": "What is the timeline of key events in this case?",
+        "description": "Chronological sequence of important events"
+    },
+    "experts": {
+        "name": "Expert witnesses",
+        "query": "Who are the expert witnesses and what are their opinions?",
+        "description": "Identify expert witnesses and their findings"
+    },
+    "contracts": {
+        "name": "Contract analysis",
+        "query": "What contracts or agreements are at issue?",
+        "description": "Identify relevant contracts and their key terms"
+    },
+    "witnesses": {
+        "name": "Key witnesses",
+        "query": "Who are the key witnesses in this case?",
+        "description": "List all witnesses and their roles"
+    },
+    "evidence": {
+        "name": "Key evidence",
+        "query": "What are the key pieces of evidence in this case?",
+        "description": "Identify important documents and exhibits"
+    },
+    "relationships": {
+        "name": "Party relationships",
+        "query": "How are the parties related to each other?",
+        "description": "Map relationships between organizations and people"
+    },
+    "obligations": {
+        "name": "Contractual obligations",
+        "query": "What are the key contractual obligations at issue?",
+        "description": "Identify disputed obligations and duties"
+    }
+}
+
+
+@api.route('/query-templates')
+def api_query_templates():
+    """Get pre-defined query templates for common legal questions."""
+    return jsonify({
+        'templates': [
+            {
+                'id': key,
+                'name': val['name'],
+                'query': val['query'],
+                'description': val['description']
+            }
+            for key, val in QUERY_TEMPLATES.items()
+        ]
+    })
+
+
+@api.route('/query-template/<template_id>')
+def api_execute_template(template_id):
+    """Execute a pre-defined query template."""
+    if template_id not in QUERY_TEMPLATES:
+        return jsonify({'error': f'Unknown template: {template_id}'}), 404
+
+    template = QUERY_TEMPLATES[template_id]
+
+    try:
+        kg = get_kg()
+        result = kg.query(template['query'])
+
+        entity_ids = [e.get('id') for e in result.entities if e.get('id')]
+
+        return jsonify({
+            'template': template['name'],
+            'query': template['query'],
+            'answer': result.answer,
+            'entities': result.entities[:50],
+            'facts': result.facts[:30],
+            'confidence': result.confidence
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== Graph Summary Generation ====================
 
 @api.route('/summary')
