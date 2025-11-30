@@ -12,7 +12,8 @@ Usage:
 import json
 import re
 import uuid
-from typing import Optional
+from difflib import SequenceMatcher
+from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 from flask import Flask, Blueprint, jsonify, request
 from flask_cors import CORS
@@ -623,6 +624,156 @@ JSON response:"""
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== Duplicate Detection ====================
+
+def _similarity(a: str, b: str) -> float:
+    """Calculate similarity ratio between two strings."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _find_duplicates(entities: List[Dict], threshold: float = 0.75) -> List[Dict]:
+    """Find potential duplicate entities using fuzzy matching."""
+    duplicates = []
+    seen_pairs = set()
+
+    # Group by type for faster comparison
+    by_type: Dict[str, List[Dict]] = {}
+    for e in entities:
+        t = e.get('type', 'Unknown')
+        if t not in by_type:
+            by_type[t] = []
+        by_type[t].append(e)
+
+    for entity_type, group in by_type.items():
+        n = len(group)
+        for i in range(n):
+            for j in range(i + 1, n):
+                e1, e2 = group[i], group[j]
+                name1 = e1.get('canonical_name', '')
+                name2 = e2.get('canonical_name', '')
+
+                # Skip if already seen
+                pair_key = tuple(sorted([e1['id'], e2['id']]))
+                if pair_key in seen_pairs:
+                    continue
+
+                # Calculate similarity
+                sim = _similarity(name1, name2)
+                if sim >= threshold:
+                    seen_pairs.add(pair_key)
+                    duplicates.append({
+                        'entity1': {
+                            'id': e1['id'],
+                            'name': name1,
+                            'type': entity_type
+                        },
+                        'entity2': {
+                            'id': e2['id'],
+                            'name': name2,
+                            'type': entity_type
+                        },
+                        'similarity': round(sim, 3),
+                        'suggestion': name1 if len(name1) >= len(name2) else name2
+                    })
+
+    # Sort by similarity (highest first)
+    duplicates.sort(key=lambda x: x['similarity'], reverse=True)
+    return duplicates
+
+
+@api.route('/duplicates')
+def api_find_duplicates():
+    """Find potential duplicate entities for cleanup."""
+    threshold = float(request.args.get('threshold', 0.75))
+    limit = int(request.args.get('limit', 100))
+    entity_type = request.args.get('type')  # Optional filter by type
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get all entities
+        if entity_type:
+            cursor.execute('''
+                SELECT id, canonical_name, type
+                FROM entities
+                WHERE type = ?
+                ORDER BY canonical_name
+            ''', (entity_type,))
+        else:
+            cursor.execute('''
+                SELECT id, canonical_name, type
+                FROM entities
+                ORDER BY type, canonical_name
+            ''')
+
+        entities = [dict(row) for row in cursor.fetchall()]
+
+        # Find duplicates
+        duplicates = _find_duplicates(entities, threshold)
+
+        return jsonify({
+            'total_entities': len(entities),
+            'potential_duplicates': len(duplicates),
+            'duplicates': duplicates[:limit],
+            'threshold': threshold
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/batch-merge', methods=['POST'])
+def api_batch_merge():
+    """Merge multiple pairs of entities at once."""
+    data = request.get_json()
+    merges = data.get('merges', [])  # List of {keep_id, merge_id}
+
+    if not merges:
+        return jsonify({'error': 'No merges provided'}), 400
+
+    try:
+        kg = get_kg()
+        results = []
+
+        for merge in merges:
+            keep_id = merge.get('keep_id')
+            merge_id = merge.get('merge_id')
+
+            if not keep_id or not merge_id:
+                results.append({'success': False, 'error': 'Missing keep_id or merge_id'})
+                continue
+
+            try:
+                kg.merge_entities(keep_id, merge_id)
+                results.append({
+                    'success': True,
+                    'kept': keep_id,
+                    'merged': merge_id
+                })
+            except Exception as e:
+                results.append({
+                    'success': False,
+                    'keep_id': keep_id,
+                    'merge_id': merge_id,
+                    'error': str(e)
+                })
+
+        successful = sum(1 for r in results if r.get('success'))
+        return jsonify({
+            'success': True,
+            'total': len(merges),
+            'successful': successful,
+            'failed': len(merges) - successful,
+            'results': results
+        })
+
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
