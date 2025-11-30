@@ -541,34 +541,50 @@ class ExtractionPipeline:
         stored = 0
 
         for fact in facts:
-            # Create Fact entity
-            fact_entity = Entity.create(
-                type="Fact",
-                canonical_name=f"{fact.fact_type}: {fact.text[:50]}...",
-                properties={
-                    "fact_type": fact.fact_type,
-                    "full_text": fact.text,
-                    **fact.properties
-                },
-                confidence="extracted"
-            )
-            fact_id = self.db.add_entity(fact_entity)
+            try:
+                # Ensure properties is a dict
+                fact_props = fact.properties if isinstance(fact.properties, dict) else {}
 
-            # Link to related entities
-            for entity_name in fact.related_entities:
-                entity_id = entity_map.get(entity_name) or self._find_entity_by_name(entity_name, entity_map)
-                if entity_id:
-                    edge = Edge.create(
-                        source_entity_id=fact_id,
-                        target_entity_id=entity_id,
-                        relation_type="about",
-                        properties={},
-                        confidence="extracted",
-                        provenance_doc_id=doc_id
-                    )
-                    self.db.add_edge(edge)
+                # Create Fact entity
+                fact_entity = Entity.create(
+                    type="Fact",
+                    canonical_name=f"{fact.fact_type}: {fact.text[:50]}...",
+                    properties={
+                        "fact_type": fact.fact_type,
+                        "full_text": fact.text,
+                        **fact_props
+                    },
+                    confidence="extracted"
+                )
+                fact_id = self.db.add_entity(fact_entity)
 
-            stored += 1
+                # Link to related entities
+                related = fact.related_entities if isinstance(fact.related_entities, list) else []
+                for entity_ref in related:
+                    # Handle both string names and dict objects
+                    if isinstance(entity_ref, str):
+                        entity_name = entity_ref
+                    elif isinstance(entity_ref, dict):
+                        entity_name = entity_ref.get('name', '') or str(entity_ref)
+                    else:
+                        continue
+
+                    entity_id = entity_map.get(entity_name) or self._find_entity_by_name(entity_name, entity_map)
+                    if entity_id:
+                        edge = Edge.create(
+                            source_entity_id=fact_id,
+                            target_entity_id=entity_id,
+                            relation_type="about",
+                            properties={},
+                            confidence="extracted",
+                            provenance_doc_id=doc_id
+                        )
+                        self.db.add_edge(edge)
+
+                stored += 1
+            except Exception as e:
+                _print(f"  Warning: Failed to store fact: {e}")
+                continue
 
         _print(f"  Stored {stored} facts")
 
