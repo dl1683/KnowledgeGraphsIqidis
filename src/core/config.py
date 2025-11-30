@@ -18,8 +18,8 @@ if not GEMINI_API_KEY:
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 # Chunking Configuration
-CHUNK_SIZE = 2000  # tokens
-CHUNK_OVERLAP = 200  # tokens (10% overlap)
+CHUNK_SIZE = 20000  # tokens (large context for Gemini)
+CHUNK_OVERLAP = 1000  # tokens (5% overlap for large chunks)
 
 # Embedding Configuration
 EMBEDDING_DIMENSION = 768

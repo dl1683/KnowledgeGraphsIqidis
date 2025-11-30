@@ -5,14 +5,23 @@ Flow:
 1. Parse document
 2. Structural extraction (defined terms, parties)
 3. Chunk document
-4. Semantic extraction per chunk
+4. Semantic extraction per chunk (PARALLEL)
 5. Entity resolution
 6. Store in graph
+
+Performance optimizations:
+- Large chunks (20K tokens) for fewer API calls
+- Unified extraction (1 API call per chunk instead of 3)
+- Parallel chunk processing with ThreadPoolExecutor
+- Global rate limiter for API safety
 """
 import os
+import threading
+import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..storage.database import Database
 from ..storage.models import Entity, Edge, Mention, Document, Alias
@@ -22,6 +31,33 @@ from ..embeddings.vector_store import VectorStore, EmbeddingGenerator
 from .structural_extractor import StructuralExtractor, StructuralExtraction
 from .semantic_extractor import SemanticExtractor, SemanticExtraction, ExtractedEntity
 from ..config import GEMINI_API_KEY, RESOLUTION_CONFIDENCE_THRESHOLD
+
+# Parallel processing settings
+MAX_PARALLEL_WORKERS = 3  # Stay within rate limits (15 req/min ÷ 4s = ~3.75)
+REQUESTS_PER_MINUTE = 15
+MIN_DELAY_BETWEEN_REQUESTS = 60.0 / REQUESTS_PER_MINUTE
+
+
+class GlobalRateLimiter:
+    """Thread-safe rate limiter for parallel API calls."""
+
+    def __init__(self, requests_per_minute: int = REQUESTS_PER_MINUTE):
+        self.min_delay = 60.0 / requests_per_minute
+        self.lock = threading.Lock()
+        self.last_request_time = 0
+
+    def acquire(self):
+        """Acquire rate limit slot, blocking if necessary."""
+        with self.lock:
+            elapsed = time.time() - self.last_request_time
+            if elapsed < self.min_delay:
+                sleep_time = self.min_delay - elapsed
+                time.sleep(sleep_time)
+            self.last_request_time = time.time()
+
+
+# Global rate limiter instance
+_global_rate_limiter = GlobalRateLimiter()
 
 
 class ExtractionPipeline:
@@ -81,35 +117,27 @@ class ExtractionPipeline:
         # Get existing entities for context
         existing_entities = [e.canonical_name for e in self.db.get_all_entities(limit=100)]
 
-        # Step 4: Semantic extraction per chunk
-        print("\n[4/6] Extracting entities, relations, and facts...")
+        # Step 4: Semantic extraction per chunk (PARALLEL)
+        print("\n[4/6] Extracting entities, relations, and facts (parallel)...")
         all_entities = []
         all_relations = []
         all_facts = []
 
-        for i, chunk in enumerate(chunks):
-            print(f"  Chunk {i+1}/{len(chunks)}...", end=" ")
+        # Use parallel processing for faster extraction
+        if len(chunks) > 1:
+            results = self._extract_chunks_parallel(chunks, existing_entities)
+        else:
+            results = self._extract_chunks_sequential(chunks, existing_entities)
 
-            try:
-                extraction = self.semantic_extractor.extract(chunk.text, existing_entities)
+        for extraction, chunk in results:
+            # Add span offsets to entities
+            for entity in extraction.entities:
+                entity.properties['chunk_start'] = chunk.start_char
+                entity.properties['chunk_end'] = chunk.end_char
 
-                # Add span offsets to entities
-                for entity in extraction.entities:
-                    entity.properties['chunk_start'] = chunk.start_char
-                    entity.properties['chunk_end'] = chunk.end_char
-
-                all_entities.extend(extraction.entities)
-                all_relations.extend(extraction.relations)
-                all_facts.extend(extraction.facts)
-
-                # Update existing entities for next chunk
-                existing_entities.extend([e.name for e in extraction.entities])
-
-                print(f"Found {len(extraction.entities)} entities, {len(extraction.relations)} relations, {len(extraction.facts)} facts")
-
-            except Exception as e:
-                print(f"Error: {e}")
-                continue
+            all_entities.extend(extraction.entities)
+            all_relations.extend(extraction.relations)
+            all_facts.extend(extraction.facts)
 
         # Step 5: Entity resolution and storage
         print("\n[5/6] Resolving and storing entities...")
@@ -134,8 +162,13 @@ class ExtractionPipeline:
 
         return doc_id
 
-    def process_directory(self, dirpath: str, recursive: bool = True) -> List[str]:
+    def process_directory(self, dirpath: str, recursive: bool = True, parallel: bool = False) -> List[str]:
         """Process all documents in a directory.
+
+        Args:
+            dirpath: Path to directory containing documents
+            recursive: Search subdirectories
+            parallel: Process documents in parallel (experimental)
 
         Returns list of successfully processed document IDs.
         """
@@ -159,16 +192,131 @@ class ExtractionPipeline:
 
         print(f"Found {len(files)} documents to process")
 
-        for filepath in files:
-            try:
-                doc_id = self.process_document(str(filepath))
-                if doc_id:
-                    processed_ids.append(doc_id)
-            except Exception as e:
-                print(f"Error processing {filepath}: {e}")
-                continue
+        if parallel and len(files) > 1:
+            processed_ids = self._process_documents_parallel(files)
+        else:
+            for filepath in files:
+                try:
+                    doc_id = self.process_document(str(filepath))
+                    if doc_id:
+                        processed_ids.append(doc_id)
+                except Exception as e:
+                    print(f"Error processing {filepath}: {e}")
+                    continue
 
         return processed_ids
+
+    def _process_documents_parallel(self, files: List[Path], max_workers: int = 2) -> List[str]:
+        """Process multiple documents in parallel.
+
+        Note: Uses limited parallelism to avoid database contention.
+        """
+        processed_ids = []
+        total_files = len(files)
+
+        print(f"\nProcessing {total_files} documents with {max_workers} parallel workers...")
+
+        def process_single(filepath: Path) -> Optional[str]:
+            """Worker function for parallel document processing."""
+            try:
+                return self.process_document(str(filepath))
+            except Exception as e:
+                print(f"Error processing {filepath}: {e}")
+                return None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_single, f): f for f in files}
+
+            completed = 0
+            for future in as_completed(futures):
+                filepath = futures[future]
+                doc_id = future.result()
+                completed += 1
+
+                if doc_id:
+                    processed_ids.append(doc_id)
+                    print(f"\n[{completed}/{total_files}] Completed: {filepath.name}")
+                else:
+                    print(f"\n[{completed}/{total_files}] Failed: {filepath.name}")
+
+        return processed_ids
+
+    def _extract_chunks_parallel(
+        self, chunks: List[Chunk], existing_entities: List[str]
+    ) -> List[Tuple[SemanticExtraction, Chunk]]:
+        """Extract from chunks in parallel using ThreadPoolExecutor."""
+        results = []
+        total_chunks = len(chunks)
+
+        print(f"  Processing {total_chunks} chunks with {MAX_PARALLEL_WORKERS} parallel workers...")
+
+        def extract_chunk(chunk_data: Tuple[int, Chunk]) -> Tuple[SemanticExtraction, Chunk, int]:
+            """Worker function for parallel extraction."""
+            idx, chunk = chunk_data
+            # Use global rate limiter
+            _global_rate_limiter.acquire()
+
+            try:
+                extraction = self.semantic_extractor.extract(chunk.text, existing_entities)
+                return extraction, chunk, idx
+            except Exception as e:
+                print(f"\n    Chunk {idx+1} error: {e}")
+                return SemanticExtraction(entities=[], relations=[], facts=[]), chunk, idx
+
+        # Process chunks in parallel
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+            # Submit all chunks
+            futures = {
+                executor.submit(extract_chunk, (i, chunk)): i
+                for i, chunk in enumerate(chunks)
+            }
+
+            # Collect results as they complete
+            completed = 0
+            for future in as_completed(futures):
+                extraction, chunk, idx = future.result()
+                results.append((extraction, chunk))
+                completed += 1
+
+                # Progress update
+                e_count = len(extraction.entities)
+                r_count = len(extraction.relations)
+                f_count = len(extraction.facts)
+                print(f"  [{completed}/{total_chunks}] Chunk {idx+1}: {e_count} entities, {r_count} relations, {f_count} facts")
+
+        # Sort results by original chunk order
+        results.sort(key=lambda x: chunks.index(x[1]))
+
+        total_e = sum(len(r[0].entities) for r in results)
+        total_r = sum(len(r[0].relations) for r in results)
+        total_f = sum(len(r[0].facts) for r in results)
+        print(f"  Total extracted: {total_e} entities, {total_r} relations, {total_f} facts")
+
+        return results
+
+    def _extract_chunks_sequential(
+        self, chunks: List[Chunk], existing_entities: List[str]
+    ) -> List[Tuple[SemanticExtraction, Chunk]]:
+        """Extract from chunks sequentially (for single chunk or fallback)."""
+        results = []
+
+        for i, chunk in enumerate(chunks):
+            print(f"  Chunk {i+1}/{len(chunks)}...", end=" ")
+
+            try:
+                extraction = self.semantic_extractor.extract(chunk.text, existing_entities)
+                results.append((extraction, chunk))
+
+                # Update existing entities for context
+                existing_entities.extend([e.name for e in extraction.entities])
+
+                print(f"Found {len(extraction.entities)} entities, {len(extraction.relations)} relations, {len(extraction.facts)} facts")
+
+            except Exception as e:
+                print(f"Error: {e}")
+                results.append((SemanticExtraction(entities=[], relations=[], facts=[]), chunk))
+
+        return results
 
     def _store_structural_results(self, structural: StructuralExtraction, doc_id: str, full_text: str):
         """Store results from structural extraction."""

@@ -64,6 +64,54 @@ class SemanticExtraction:
 class SemanticExtractor:
     """Extract entities, relations, and facts using Gemini Flash Lite."""
 
+    # Unified extraction prompt - extracts everything in one API call
+    UNIFIED_EXTRACTION_PROMPT = """You are a legal document analyzer. Extract ALL entities, relationships, and facts from the following text in a SINGLE response.
+
+OUTPUT FORMAT - Return a JSON object with three arrays:
+{
+  "entities": [...],
+  "relations": [...],
+  "facts": [...]
+}
+
+=== ENTITIES ===
+For each entity, provide:
+- name: Canonical name
+- type: One of [Person, Organization, Location, Money, Date, Reference]
+- properties: Relevant attributes (role, title, amount, currency, etc.)
+- span_text: Exact text where entity appears
+
+Entity Types:
+- Person: Individuals mentioned by name
+- Organization: Companies, firms, courts, agencies
+- Location: Cities, states, countries, addresses
+- Money: Dollar amounts, fees, damages
+- Date: Specific dates
+- Reference: Citations to cases, statutes, exhibits
+
+=== RELATIONS ===
+For each relationship, provide:
+- source_name: Source entity name
+- target_name: Target entity name
+- relation_type: One of [represents, party_to, signed, employed_by, affiliated_with, testified, references, mentioned_in, about, binds, related_to]
+- properties: Details about the relationship
+
+=== FACTS ===
+For each fact, provide:
+- fact_type: One of [obligation, admission, deadline, key_term, allegation, finding, quote]
+- text: The relevant text (verbatim or summarized)
+- related_entities: List of entity names this fact relates to
+- properties: Additional details
+
+TEXT TO ANALYZE:
+{text}
+
+EXISTING ENTITIES (link to these if mentioned, avoid duplicates):
+{existing_entities}
+
+Output ONLY valid JSON with entities, relations, and facts arrays:
+"""
+
     ENTITY_EXTRACTION_PROMPT = """You are a legal document analyzer. Extract all entities from the following text chunk.
 
 For each entity, identify:
@@ -160,7 +208,7 @@ Output only valid JSON array of facts:
         self.generation_config = genai.GenerationConfig(
             temperature=0.1,  # Low temperature for consistent extraction
             top_p=0.95,
-            max_output_tokens=8192,
+            max_output_tokens=16384,  # Increased for unified extraction
         )
 
     def _rate_limit(self):
@@ -193,7 +241,112 @@ Output only valid JSON array of facts:
         raise Exception(f"Failed after {MAX_RETRIES} retries")
 
     def extract(self, text: str, existing_entities: List[str] = None) -> SemanticExtraction:
-        """Extract entities, relations, and facts from text."""
+        """Extract entities, relations, and facts from text using unified prompt (1 API call)."""
+        existing_entities = existing_entities or []
+
+        # Use unified extraction - 1 API call instead of 3
+        return self._extract_unified(text, existing_entities)
+
+    def _extract_unified(self, text: str, existing_entities: List[str]) -> SemanticExtraction:
+        """Extract everything in a single API call for efficiency."""
+        existing_str = "\n".join(f"- {e}" for e in existing_entities[:100]) if existing_entities else "None"
+
+        # For large chunks, we can pass more text since Gemini has large context
+        max_text_len = 50000  # ~20K tokens
+
+        prompt = self.UNIFIED_EXTRACTION_PROMPT.format(
+            text=text[:max_text_len],
+            existing_entities=existing_str
+        )
+
+        try:
+            response_text = self._call_with_retry(prompt)
+
+            # Parse unified JSON response
+            result = self._parse_unified_response(response_text)
+
+            return SemanticExtraction(
+                entities=result['entities'],
+                relations=result['relations'],
+                facts=result['facts']
+            )
+
+        except Exception as ex:
+            print(f"Unified extraction error: {ex}")
+            # Fallback to empty results
+            return SemanticExtraction(entities=[], relations=[], facts=[])
+
+    def _parse_unified_response(self, response_text: str) -> Dict[str, List]:
+        """Parse unified extraction response."""
+        result = {'entities': [], 'relations': [], 'facts': []}
+
+        if not response_text:
+            return result
+
+        text = response_text.strip()
+
+        # Remove markdown code blocks if present
+        if text.startswith('```'):
+            lines = text.split('\n')
+            start_idx = 1 if lines[0].startswith('```') else 0
+            end_idx = len(lines)
+            for i in range(len(lines) - 1, -1, -1):
+                if lines[i].strip() == '```':
+                    end_idx = i
+                    break
+            text = '\n'.join(lines[start_idx:end_idx])
+
+        try:
+            parsed = json.loads(text)
+
+            # Extract entities
+            for e in parsed.get('entities', []):
+                if isinstance(e, dict):
+                    result['entities'].append(ExtractedEntity(
+                        name=e.get('name', ''),
+                        type=e.get('type', 'Unknown'),
+                        properties=e.get('properties', {}),
+                        span_text=e.get('span_text', e.get('name', '')),
+                        confidence=e.get('confidence', 0.8)
+                    ))
+
+            # Extract relations
+            for r in parsed.get('relations', []):
+                if isinstance(r, dict):
+                    result['relations'].append(ExtractedRelation(
+                        source_name=r.get('source_name', ''),
+                        target_name=r.get('target_name', ''),
+                        relation_type=r.get('relation_type', 'related_to'),
+                        properties=r.get('properties', {}),
+                        confidence=r.get('confidence', 0.7)
+                    ))
+
+            # Extract facts
+            for f in parsed.get('facts', []):
+                if isinstance(f, dict):
+                    result['facts'].append(ExtractedFact(
+                        fact_type=f.get('fact_type', 'key_term'),
+                        text=f.get('text', ''),
+                        related_entities=f.get('related_entities', []),
+                        properties=f.get('properties', {}),
+                        confidence=f.get('confidence', 0.7)
+                    ))
+
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error in unified response: {e}")
+            # Try to find JSON object in text
+            obj_match = re.search(r'\{[\s\S]*\}', text)
+            if obj_match:
+                try:
+                    parsed = json.loads(obj_match.group())
+                    return self._parse_unified_response(json.dumps(parsed))
+                except:
+                    pass
+
+        return result
+
+    def extract_legacy(self, text: str, existing_entities: List[str] = None) -> SemanticExtraction:
+        """Legacy extraction using 3 separate API calls (kept for fallback)."""
         existing_entities = existing_entities or []
 
         # Step 1: Extract entities
