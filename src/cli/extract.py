@@ -12,6 +12,9 @@ import sys
 import time
 from pathlib import Path
 
+# Force unbuffered output for real-time progress
+sys.stdout.reconfigure(line_buffering=True)
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 

@@ -16,12 +16,18 @@ Performance optimizations:
 - Global rate limiter for API safety
 """
 import os
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def _print(*args, **kwargs):
+    """Print with flush for real-time output."""
+    print(*args, **kwargs, flush=True)
 
 from ..storage.database import Database
 from ..storage.models import Entity, Edge, Mention, Document, Alias
@@ -77,22 +83,22 @@ class ExtractionPipeline:
 
         Returns the document ID if successful.
         """
-        print(f"\n{'='*60}")
-        print(f"Processing: {filepath}")
-        print('='*60)
+        _print(f"\n{'='*60}")
+        _print(f"Processing: {filepath}")
+        _print('='*60)
 
         # Step 1: Parse document
-        print("\n[1/6] Parsing document...")
+        _print("\n[1/6] Parsing document...")
         parsed = self.parser.parse(filepath)
         if not parsed:
-            print(f"Failed to parse: {filepath}")
+            _print(f"Failed to parse: {filepath}")
             return None
 
         # Check if already processed
         if skip_if_exists:
             existing = self.db.get_document_by_hash(parsed.file_hash)
             if existing and existing.processed_at:
-                print(f"Document already processed: {existing.id}")
+                _print(f"Document already processed: {existing.id}")
                 return existing.id
 
         # Create document record
@@ -102,23 +108,23 @@ class ExtractionPipeline:
             file_hash=parsed.file_hash
         )
         doc_id = self.db.add_document(doc)
-        print(f"Created document record: {doc_id}")
+        _print(f"Created document record: {doc_id}")
 
         # Step 2: Structural extraction
-        print("\n[2/6] Extracting structural elements...")
+        _print("\n[2/6] Extracting structural elements...")
         structural = self.structural_extractor.extract(parsed.text)
         self._store_structural_results(structural, doc_id, parsed.text)
 
         # Step 3: Chunk document
-        print("\n[3/6] Chunking document...")
+        _print("\n[3/6] Chunking document...")
         chunks = self.chunker.chunk_text(parsed.text)
-        print(f"Created {len(chunks)} chunks")
+        _print(f"Created {len(chunks)} chunks")
 
         # Get existing entities for context
         existing_entities = [e.canonical_name for e in self.db.get_all_entities(limit=100)]
 
         # Step 4: Semantic extraction per chunk (PARALLEL)
-        print("\n[4/6] Extracting entities, relations, and facts (parallel)...")
+        _print("\n[4/6] Extracting entities, relations, and facts (parallel)...")
         all_entities = []
         all_relations = []
         all_facts = []
@@ -140,11 +146,11 @@ class ExtractionPipeline:
             all_facts.extend(extraction.facts)
 
         # Step 5: Entity resolution and storage
-        print("\n[5/6] Resolving and storing entities...")
+        _print("\n[5/6] Resolving and storing entities...")
         entity_map = self._resolve_and_store_entities(all_entities, doc_id, parsed.text)
 
         # Step 6: Store relations and facts
-        print("\n[6/6] Storing relations and facts...")
+        _print("\n[6/6] Storing relations and facts...")
         self._store_relations(all_relations, entity_map, doc_id)
         self._store_facts(all_facts, entity_map, doc_id)
 
@@ -154,11 +160,11 @@ class ExtractionPipeline:
         # Save vector store
         self.vector_store.save()
 
-        print(f"\n{'='*60}")
-        print(f"Document processing complete: {doc_id}")
+        _print(f"\n{'='*60}")
+        _print(f"Document processing complete: {doc_id}")
         stats = self.db.get_stats()
-        print(f"Graph now has: {stats['entities']} entities, {stats['edges']} edges")
-        print('='*60)
+        _print(f"Graph now has: {stats['entities']} entities, {stats['edges']} edges")
+        _print('='*60)
 
         return doc_id
 
@@ -174,7 +180,7 @@ class ExtractionPipeline:
         """
         dirpath = Path(dirpath)
         if not dirpath.exists():
-            print(f"Directory not found: {dirpath}")
+            _print(f"Directory not found: {dirpath}")
             return []
 
         supported_extensions = self.parser.get_supported_extensions()
@@ -190,7 +196,7 @@ class ExtractionPipeline:
             for ext in supported_extensions:
                 files.extend(dirpath.glob(f"*{ext}"))
 
-        print(f"Found {len(files)} documents to process")
+        _print(f"Found {len(files)} documents to process")
 
         if parallel and len(files) > 1:
             processed_ids = self._process_documents_parallel(files)
@@ -201,7 +207,7 @@ class ExtractionPipeline:
                     if doc_id:
                         processed_ids.append(doc_id)
                 except Exception as e:
-                    print(f"Error processing {filepath}: {e}")
+                    _print(f"Error processing {filepath}: {e}")
                     continue
 
         return processed_ids
@@ -214,14 +220,14 @@ class ExtractionPipeline:
         processed_ids = []
         total_files = len(files)
 
-        print(f"\nProcessing {total_files} documents with {max_workers} parallel workers...")
+        _print(f"\nProcessing {total_files} documents with {max_workers} parallel workers...")
 
         def process_single(filepath: Path) -> Optional[str]:
             """Worker function for parallel document processing."""
             try:
                 return self.process_document(str(filepath))
             except Exception as e:
-                print(f"Error processing {filepath}: {e}")
+                _print(f"Error processing {filepath}: {e}")
                 return None
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -235,9 +241,9 @@ class ExtractionPipeline:
 
                 if doc_id:
                     processed_ids.append(doc_id)
-                    print(f"\n[{completed}/{total_files}] Completed: {filepath.name}")
+                    _print(f"\n[{completed}/{total_files}] Completed: {filepath.name}")
                 else:
-                    print(f"\n[{completed}/{total_files}] Failed: {filepath.name}")
+                    _print(f"\n[{completed}/{total_files}] Failed: {filepath.name}")
 
         return processed_ids
 
@@ -248,7 +254,7 @@ class ExtractionPipeline:
         results = []
         total_chunks = len(chunks)
 
-        print(f"  Processing {total_chunks} chunks with {MAX_PARALLEL_WORKERS} parallel workers...")
+        _print(f"  Processing {total_chunks} chunks with {MAX_PARALLEL_WORKERS} parallel workers...")
 
         def extract_chunk(chunk_data: Tuple[int, Chunk]) -> Tuple[SemanticExtraction, Chunk, int]:
             """Worker function for parallel extraction."""
@@ -260,7 +266,7 @@ class ExtractionPipeline:
                 extraction = self.semantic_extractor.extract(chunk.text, existing_entities)
                 return extraction, chunk, idx
             except Exception as e:
-                print(f"\n    Chunk {idx+1} error: {e}")
+                _print(f"\n    Chunk {idx+1} error: {e}")
                 return SemanticExtraction(entities=[], relations=[], facts=[]), chunk, idx
 
         # Process chunks in parallel
@@ -282,7 +288,7 @@ class ExtractionPipeline:
                 e_count = len(extraction.entities)
                 r_count = len(extraction.relations)
                 f_count = len(extraction.facts)
-                print(f"  [{completed}/{total_chunks}] Chunk {idx+1}: {e_count} entities, {r_count} relations, {f_count} facts")
+                _print(f"  [{completed}/{total_chunks}] Chunk {idx+1}: {e_count} entities, {r_count} relations, {f_count} facts")
 
         # Sort results by original chunk order
         results.sort(key=lambda x: chunks.index(x[1]))
@@ -290,7 +296,7 @@ class ExtractionPipeline:
         total_e = sum(len(r[0].entities) for r in results)
         total_r = sum(len(r[0].relations) for r in results)
         total_f = sum(len(r[0].facts) for r in results)
-        print(f"  Total extracted: {total_e} entities, {total_r} relations, {total_f} facts")
+        _print(f"  Total extracted: {total_e} entities, {total_r} relations, {total_f} facts")
 
         return results
 
@@ -301,7 +307,7 @@ class ExtractionPipeline:
         results = []
 
         for i, chunk in enumerate(chunks):
-            print(f"  Chunk {i+1}/{len(chunks)}...", end=" ")
+            _print(f"  Chunk {i+1}/{len(chunks)}...", end=" ")
 
             try:
                 extraction = self.semantic_extractor.extract(chunk.text, existing_entities)
@@ -310,10 +316,10 @@ class ExtractionPipeline:
                 # Update existing entities for context
                 existing_entities.extend([e.name for e in extraction.entities])
 
-                print(f"Found {len(extraction.entities)} entities, {len(extraction.relations)} relations, {len(extraction.facts)} facts")
+                _print(f"Found {len(extraction.entities)} entities, {len(extraction.relations)} relations, {len(extraction.facts)} facts")
 
             except Exception as e:
-                print(f"Error: {e}")
+                _print(f"Error: {e}")
                 results.append((SemanticExtraction(entities=[], relations=[], facts=[]), chunk))
 
         return results
@@ -388,7 +394,7 @@ class ExtractionPipeline:
             )
             self.db.add_entity(doc_entity)
 
-        print(f"  Stored {len(structural.parties)} parties, {len(structural.defined_terms)} defined terms")
+        _print(f"  Stored {len(structural.parties)} parties, {len(structural.defined_terms)} defined terms")
 
     def _resolve_and_store_entities(self, entities: List[ExtractedEntity], doc_id: str, full_text: str) -> Dict[str, str]:
         """Resolve extracted entities against existing graph and store.
@@ -498,7 +504,7 @@ class ExtractionPipeline:
             embedding = self.embedding_generator.generate(text)
             self.vector_store.add(entity_id, embedding)
         except Exception as e:
-            print(f"Warning: Could not generate embedding for {name}: {e}")
+            _print(f"Warning: Could not generate embedding for {name}: {e}")
 
     def _store_relations(self, relations: List, entity_map: Dict[str, str], doc_id: str):
         """Store extracted relations in the graph."""
@@ -525,7 +531,7 @@ class ExtractionPipeline:
                 self.db.add_edge(edge)
                 stored += 1
 
-        print(f"  Stored {stored} relations")
+        _print(f"  Stored {stored} relations")
 
     def _store_facts(self, facts: List, entity_map: Dict[str, str], doc_id: str):
         """Store extracted facts as Fact entities."""
@@ -561,7 +567,7 @@ class ExtractionPipeline:
 
             stored += 1
 
-        print(f"  Stored {stored} facts")
+        _print(f"  Stored {stored} facts")
 
     def _find_entity_by_name(self, name: str, entity_map: Dict[str, str]) -> Optional[str]:
         """Find entity ID by name with fuzzy matching."""
