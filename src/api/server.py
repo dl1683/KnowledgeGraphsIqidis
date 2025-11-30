@@ -1322,6 +1322,32 @@ def api_shortest_path():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Find Connections ====================
+
+@api.route('/connections')
+def api_connections():
+    """Find all paths/connections between two entities."""
+    entity1 = request.args.get('entity1', '')
+    entity2 = request.args.get('entity2', '')
+
+    if not entity1 or not entity2:
+        return jsonify({'error': 'Both entity1 and entity2 parameters required'}), 400
+
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+
+        result = query_engine.find_connections(entity1, entity2)
+        return jsonify(result)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== Entity Clusters ====================
 
 def _build_adjacency(edges: List[Dict]) -> Dict[str, set]:

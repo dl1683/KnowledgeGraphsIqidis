@@ -489,6 +489,163 @@ Output as JSON array:
 
         return [], []  # No path found
 
+    def _multi_hop_explore(self, start_entities: List[Entity], max_hops: int = 2,
+                           relation_filter: List[str] = None) -> Tuple[List[Entity], List[Edge]]:
+        """Explore graph from starting entities up to max_hops away.
+
+        This enables multi-hop reasoning - finding connections that span multiple relationships.
+        """
+        all_entities = list(start_entities)
+        all_edges = []
+        visited_entity_ids = {e.id for e in start_entities}
+        current_frontier = [e.id for e in start_entities]
+
+        for hop in range(max_hops):
+            next_frontier = []
+
+            for entity_id in current_frontier:
+                # Get outgoing edges
+                outgoing = self.db.get_edges_from(entity_id)
+                for edge in outgoing:
+                    # Apply relation filter if specified
+                    if relation_filter and edge.relation_type not in relation_filter:
+                        continue
+
+                    if edge.target_entity_id not in visited_entity_ids:
+                        target = self.db.get_entity(edge.target_entity_id)
+                        if target:
+                            all_entities.append(target)
+                            visited_entity_ids.add(edge.target_entity_id)
+                            next_frontier.append(edge.target_entity_id)
+                    all_edges.append(edge)
+
+                # Get incoming edges
+                incoming = self.db.get_edges_to(entity_id)
+                for edge in incoming:
+                    if relation_filter and edge.relation_type not in relation_filter:
+                        continue
+
+                    if edge.source_entity_id not in visited_entity_ids:
+                        source = self.db.get_entity(edge.source_entity_id)
+                        if source:
+                            all_entities.append(source)
+                            visited_entity_ids.add(edge.source_entity_id)
+                            next_frontier.append(edge.source_entity_id)
+                    all_edges.append(edge)
+
+            current_frontier = next_frontier
+            if not current_frontier:
+                break
+
+        return all_entities, all_edges
+
+    def _find_all_paths(self, start_id: str, end_id: str, max_depth: int = 4) -> List[Tuple[List[str], List[Edge]]]:
+        """Find all paths between two entities (up to max_depth)."""
+        all_paths = []
+
+        def dfs(current_id: str, target_id: str, path: List[str], edges: List[Edge], visited: set):
+            if len(path) > max_depth:
+                return
+
+            if current_id == target_id:
+                all_paths.append((path.copy(), edges.copy()))
+                return
+
+            visited.add(current_id)
+
+            # Outgoing edges
+            for edge in self.db.get_edges_from(current_id):
+                neighbor = edge.target_entity_id
+                if neighbor not in visited:
+                    path.append(neighbor)
+                    edges.append(edge)
+                    dfs(neighbor, target_id, path, edges, visited)
+                    path.pop()
+                    edges.pop()
+
+            # Incoming edges
+            for edge in self.db.get_edges_to(current_id):
+                neighbor = edge.source_entity_id
+                if neighbor not in visited:
+                    path.append(neighbor)
+                    edges.append(edge)
+                    dfs(neighbor, target_id, path, edges, visited)
+                    path.pop()
+                    edges.pop()
+
+            visited.remove(current_id)
+
+        dfs(start_id, end_id, [start_id], [], set())
+        return all_paths
+
+    def find_connections(self, entity_name1: str, entity_name2: str) -> Dict[str, Any]:
+        """Find all connections between two named entities.
+
+        Returns structured data about how the entities are connected.
+        """
+        # Find the entities
+        e1_matches = self.db.search_entities_by_name(entity_name1, limit=3)
+        e2_matches = self.db.search_entities_by_name(entity_name2, limit=3)
+
+        if not e1_matches or not e2_matches:
+            return {
+                'found': False,
+                'message': f"Could not find entities matching '{entity_name1}' and/or '{entity_name2}'"
+            }
+
+        e1 = e1_matches[0]
+        e2 = e2_matches[0]
+
+        # Find all paths
+        all_paths = self._find_all_paths(e1.id, e2.id, max_depth=4)
+
+        if not all_paths:
+            return {
+                'found': False,
+                'entity1': {'id': e1.id, 'name': e1.canonical_name, 'type': e1.type},
+                'entity2': {'id': e2.id, 'name': e2.canonical_name, 'type': e2.type},
+                'message': 'No connection found within 4 hops'
+            }
+
+        # Format paths
+        formatted_paths = []
+        for path_ids, edges in all_paths[:10]:  # Limit to 10 paths
+            path_entities = []
+            for eid in path_ids:
+                entity = self.db.get_entity(eid)
+                if entity:
+                    path_entities.append({
+                        'id': eid,
+                        'name': entity.canonical_name,
+                        'type': entity.type
+                    })
+
+            path_edges = []
+            for edge in edges:
+                path_edges.append({
+                    'relation': edge.relation_type,
+                    'source': edge.source_entity_id,
+                    'target': edge.target_entity_id
+                })
+
+            formatted_paths.append({
+                'length': len(path_ids) - 1,
+                'entities': path_entities,
+                'edges': path_edges
+            })
+
+        # Sort by path length
+        formatted_paths.sort(key=lambda p: p['length'])
+
+        return {
+            'found': True,
+            'entity1': {'id': e1.id, 'name': e1.canonical_name, 'type': e1.type},
+            'entity2': {'id': e2.id, 'name': e2.canonical_name, 'type': e2.type},
+            'num_paths': len(all_paths),
+            'shortest_path_length': formatted_paths[0]['length'] if formatted_paths else None,
+            'paths': formatted_paths
+        }
+
     def _get_graph_schema(self) -> str:
         """Get a description of the graph schema for LLM exploration."""
         stats = self.db.get_stats()
