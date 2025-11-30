@@ -1378,6 +1378,36 @@ QUERY_TEMPLATES = {
 }
 
 
+@api.route('/schema')
+def api_schema():
+    """Get the current graph schema (entity types, relationship types, counts)."""
+    try:
+        from ..core.query.nl_query import NLQueryEngine
+
+        kg = get_kg()
+        query_engine = NLQueryEngine(kg.db, kg.vector_store)
+        schema = query_engine._get_live_schema(force_refresh=True)
+
+        # Also return structured data
+        stats = kg.db.get_stats()
+
+        return jsonify({
+            'schema_text': schema,
+            'entity_types': stats.get('entities_by_type', {}),
+            'relationship_types': stats.get('edges_by_type', {}),
+            'totals': {
+                'entities': stats.get('total_entities', 0),
+                'edges': stats.get('total_edges', 0),
+                'documents': stats.get('total_documents', 0)
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @api.route('/query-templates')
 def api_query_templates():
     """Get pre-defined query templates for common legal questions."""
