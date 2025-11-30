@@ -110,7 +110,7 @@ User Question: {query}
 Output JSON with the analysis:
 """
 
-    ANSWER_GENERATION_PROMPT = """You are a legal assistant answering questions based on knowledge graph data from legal documents.
+    ANSWER_GENERATION_PROMPT = """You are a legal assistant providing precise, well-cited answers from knowledge graph data extracted from legal documents.
 
 User's Question: {query}
 
@@ -120,19 +120,38 @@ ENTITIES FOUND:
 RELATIONSHIPS:
 {relationships}
 
-KEY FACTS:
+KEY FACTS (with sources):
 {facts}
 
-Instructions:
-1. Synthesize a clear, comprehensive answer using the data above
-2. ALWAYS cite specific entity names and facts
-3. Group related information logically
-4. For legal questions, note relevant parties, dates, and amounts
-5. If data seems incomplete, note what information is missing
-6. Use bullet points for lists of items
-7. Highlight key findings or conclusions
+Instructions for generating the answer:
+1. STRUCTURE YOUR ANSWER:
+   - Start with a direct answer to the question (1-2 sentences)
+   - Provide supporting details with citations
+   - End with any caveats or missing information
 
-Answer:
+2. CITATION REQUIREMENTS:
+   - Cite source documents when available (e.g., "[Source: Pre-Hearing Brief]")
+   - When stating facts, indicate fact type in parentheses (allegation, finding, obligation, etc.)
+   - Use entity names exactly as they appear in the data
+
+3. FORMATTING:
+   - Use bullet points for multiple items
+   - Bold key names, dates, and amounts
+   - Group related information under subheadings if the answer is complex
+   - Use markdown formatting
+
+4. FOR LEGAL QUESTIONS:
+   - Clearly distinguish between allegations and proven facts
+   - Note relevant parties, dates, monetary amounts
+   - Highlight contractual obligations or deadlines
+   - Identify any conflicts in the evidence
+
+5. QUALITY CHECKS:
+   - Only state what is supported by the provided data
+   - If asked about something not in the data, say so clearly
+   - Note if information seems incomplete or contradictory
+
+Provide your answer:
 """
 
     # Enhanced fact synthesis prompt
@@ -1206,17 +1225,34 @@ SAMPLE ENTITIES:
         else:
             relationships_str = "None found"
 
-        # Format facts
+        # Format facts with source citations
         facts_str = ""
         if facts:
             fact_lines = []
-            for f in facts[:15]:
+            for f in facts[:20]:  # Include more facts
                 fact_type = f.get('type', f.get('fact_type', 'fact'))
-                text = f.get('text', f.get('full_text', ''))[:250]
-                fact_lines.append(f"- [{fact_type}] {text}")
+                text = f.get('text', f.get('full_text', ''))[:300]
+                source = f.get('source_doc', f.get('provenance_doc_id', ''))
+                confidence = f.get('confidence', '')
+
+                line = f"- [{fact_type.upper()}] {text}"
+                if source:
+                    line += f" [Source: {source[:30]}]"
+                if confidence:
+                    line += f" (confidence: {confidence})"
+                fact_lines.append(line)
             facts_str = "\n".join(fact_lines)
         else:
             facts_str = "None found"
+
+        # Also include Fact entities as additional context
+        fact_entities = [e for e in entities if e.type == 'Fact']
+        if fact_entities and len(facts_str) < 2000:
+            facts_str += "\n\nADDITIONAL FACTS FROM ENTITIES:"
+            for fe in fact_entities[:10]:
+                fact_text = fe.properties.get('full_text', fe.canonical_name)[:200]
+                fact_type = fe.properties.get('fact_type', 'fact')
+                facts_str += f"\n- [{fact_type.upper()}] {fact_text}"
 
         # Generate answer with structured prompt
         prompt = self.ANSWER_GENERATION_PROMPT.format(
