@@ -1322,6 +1322,132 @@ def api_shortest_path():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== Graph Summary Generation ====================
+
+@api.route('/summary')
+def api_graph_summary():
+    """Generate a natural language summary of the knowledge graph."""
+    max_entities = int(request.args.get('max_entities', 30))
+    include_facts = request.args.get('include_facts', 'true').lower() == 'true'
+
+    try:
+        exp = get_exporter()
+        cursor = exp.conn.cursor()
+
+        # Get key entities by importance
+        cursor.execute('''
+            SELECT e.id, e.canonical_name, e.type, e.properties, e.confidence,
+                   (SELECT COUNT(*) FROM edges WHERE source_entity_id = e.id OR target_entity_id = e.id) as degree
+            FROM entities e
+            WHERE e.type IN ('Organization', 'Person', 'Document')
+            ORDER BY degree DESC
+            LIMIT ?
+        ''', (max_entities,))
+        key_entities = [dict(row) for row in cursor.fetchall()]
+
+        # Get key relationships
+        cursor.execute('''
+            SELECT e.relation_type, src.canonical_name as source_name, tgt.canonical_name as target_name,
+                   src.type as source_type, tgt.type as target_type
+            FROM edges e
+            JOIN entities src ON e.source_entity_id = src.id
+            JOIN entities tgt ON e.target_entity_id = tgt.id
+            WHERE src.type IN ('Organization', 'Person') OR tgt.type IN ('Organization', 'Person')
+            ORDER BY e.created_at DESC
+            LIMIT 50
+        ''')
+        key_relationships = [dict(row) for row in cursor.fetchall()]
+
+        # Get key facts if requested
+        key_facts = []
+        if include_facts:
+            cursor.execute('''
+                SELECT canonical_name, properties
+                FROM entities
+                WHERE type = 'Fact'
+                ORDER BY created_at DESC
+                LIMIT 30
+            ''')
+            for row in cursor.fetchall():
+                props = json.loads(row['properties']) if row['properties'] else {}
+                key_facts.append({
+                    'type': props.get('fact_type', 'fact'),
+                    'text': props.get('full_text', row['canonical_name'])[:300]
+                })
+
+        # Get money entities
+        cursor.execute('''
+            SELECT canonical_name, properties FROM entities WHERE type = 'Money' LIMIT 20
+        ''')
+        money_entities = [dict(row) for row in cursor.fetchall()]
+
+        # Get dates
+        cursor.execute('''
+            SELECT canonical_name FROM entities WHERE type = 'Date' LIMIT 20
+        ''')
+        date_entities = [row['canonical_name'] for row in cursor.fetchall()]
+
+        # Build summary prompt
+        summary_data = {
+            'key_parties': [{'name': e['canonical_name'], 'type': e['type'], 'connections': e['degree']}
+                           for e in key_entities if e['type'] in ('Organization', 'Person')][:15],
+            'key_relationships': [f"{r['source_name']} {r['relation_type']} {r['target_name']}"
+                                 for r in key_relationships[:20]],
+            'key_facts': [f"[{f['type']}] {f['text']}" for f in key_facts[:15]],
+            'money_amounts': [e['canonical_name'] for e in money_entities[:10]],
+            'key_dates': date_entities[:10]
+        }
+
+        # Generate summary using LLM
+        prompt = f"""Based on this knowledge graph data from a legal case, provide a concise executive summary.
+
+KEY PARTIES (most connected entities):
+{chr(10).join([f"- {p['name']} ({p['type']}, {p['connections']} connections)" for p in summary_data['key_parties']])}
+
+KEY RELATIONSHIPS:
+{chr(10).join([f"- {r}" for r in summary_data['key_relationships']])}
+
+KEY FACTS:
+{chr(10).join([f"- {f}" for f in summary_data['key_facts']])}
+
+MONETARY AMOUNTS:
+{', '.join(summary_data['money_amounts']) if summary_data['money_amounts'] else 'None found'}
+
+KEY DATES:
+{', '.join(summary_data['key_dates']) if summary_data['key_dates'] else 'None found'}
+
+Provide a 3-4 paragraph executive summary covering:
+1. The main parties involved and their roles
+2. The nature of the dispute/matter
+3. Key claims, allegations, or issues
+4. Important dates and monetary amounts if relevant
+
+Be factual and cite the entities mentioned above. Output only the summary text."""
+
+        # Call LLM
+        if _nl_edit_model:
+            response = _nl_edit_model.generate_content(prompt)
+            summary_text = response.text
+        else:
+            summary_text = "Summary generation requires LLM model to be configured."
+
+        return jsonify({
+            'summary': summary_text,
+            'data_used': {
+                'key_parties_count': len(summary_data['key_parties']),
+                'relationships_count': len(summary_data['key_relationships']),
+                'facts_count': len(summary_data['key_facts']),
+                'money_amounts': summary_data['money_amounts'],
+                'key_dates': summary_data['key_dates']
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== Relationship Analysis ====================
 
 @api.route('/relationship-analysis')
