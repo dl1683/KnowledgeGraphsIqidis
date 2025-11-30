@@ -65,14 +65,15 @@ class SemanticExtractor:
     """Extract entities, relations, and facts using Gemini Flash Lite."""
 
     # Unified extraction prompt - extracts everything in one API call
+    # Note: {{ and }} are escaped braces for Python's str.format()
     UNIFIED_EXTRACTION_PROMPT = """You are a legal document analyzer. Extract ALL entities, relationships, and facts from the following text in a SINGLE response.
 
 OUTPUT FORMAT - Return a JSON object with three arrays:
-{
+{{
   "entities": [...],
   "relations": [...],
   "facts": [...]
-}
+}}
 
 === ENTITIES ===
 For each entity, provide:
@@ -262,6 +263,11 @@ Output only valid JSON array of facts:
         try:
             response_text = self._call_with_retry(prompt)
 
+            # Debug: Check response format
+            if response_text:
+                first_chars = repr(response_text[:50]) if len(response_text) > 50 else repr(response_text)
+                # print(f"    [DEBUG] Response starts with: {first_chars}")
+
             # Parse unified JSON response
             result = self._parse_unified_response(response_text)
 
@@ -272,30 +278,62 @@ Output only valid JSON array of facts:
             )
 
         except Exception as ex:
-            print(f"Unified extraction error: {ex}")
+            import traceback
+            print(f"Unified extraction error: {type(ex).__name__}: {ex}")
+            traceback.print_exc()
             # Fallback to empty results
             return SemanticExtraction(entities=[], relations=[], facts=[])
 
     def _parse_unified_response(self, response_text: str) -> Dict[str, List]:
-        """Parse unified extraction response."""
+        """Parse unified extraction response with robust JSON handling."""
         result = {'entities': [], 'relations': [], 'facts': []}
 
         if not response_text:
             return result
 
-        text = response_text.strip()
+        text = response_text
 
         # Remove markdown code blocks if present
-        if text.startswith('```'):
-            lines = text.split('\n')
-            start_idx = 1 if lines[0].startswith('```') else 0
-            end_idx = len(lines)
-            for i in range(len(lines) - 1, -1, -1):
-                if lines[i].strip() == '```':
-                    end_idx = i
-                    break
-            text = '\n'.join(lines[start_idx:end_idx])
+        if '```' in text:
+            # Find content between ``` markers
+            import re as _re
+            code_match = _re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+            if code_match:
+                text = code_match.group(1)
+            else:
+                # Fallback: strip ``` lines
+                lines = text.split('\n')
+                filtered = [l for l in lines if not l.strip().startswith('```')]
+                text = '\n'.join(filtered)
 
+        # Strip whitespace after removing code blocks
+        text = text.strip()
+
+        # Handle response that doesn't start with { (common Gemini behavior)
+        if not text.startswith('{'):
+            # Find the first JSON key
+            first_key_pos = -1
+            for key in ['"entities"', '"relations"', '"facts"']:
+                pos = text.find(key)
+                if pos != -1 and (first_key_pos == -1 or pos < first_key_pos):
+                    first_key_pos = pos
+
+            if first_key_pos != -1:
+                # Wrap from the first key onwards with opening brace
+                text = '{' + text[first_key_pos:]
+            elif text.startswith('['):
+                # It's an array - wrap as entities
+                text = '{"entities": ' + text + '}'
+
+        # Ensure closing brace if we have opening
+        if text.startswith('{'):
+            # Count braces to ensure proper closing
+            open_braces = text.count('{')
+            close_braces = text.count('}')
+            if open_braces > close_braces:
+                text = text.rstrip() + '}' * (open_braces - close_braces)
+
+        # Try parsing the JSON
         try:
             parsed = json.loads(text)
 
